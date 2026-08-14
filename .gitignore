@@ -1,0 +1,46 @@
+# Maven / Java
+target/
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+.npm
+.cache/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*~
