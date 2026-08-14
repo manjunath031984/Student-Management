@@ -278,8 +278,8 @@ input {
 .stat-chip {
   padding: 1.15rem 1.2rem;
   border-radius: 18px;
-  background: rgba(248, 252, 250, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: #ffffff;
+  border: 1px solid rgba(13, 31, 27, 0.12);
   box-shadow: var(--shadow-md);
   animation: rise-in 0.55s ease 0.08s both;
 }
@@ -289,13 +289,13 @@ input {
   font-family: 'Libre Baskerville', serif;
   font-size: 2rem;
   line-height: 1;
-  color: var(--brand-3);
+  color: #0a3f36;
 }
 
 .stat-chip span {
   display: block;
   margin-top: 0.4rem;
-  color: var(--muted);
+  color: #3f5a54;
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -303,8 +303,17 @@ input {
 }
 
 .stat-chip.accent {
-  background:
-    linear-gradient(160deg, rgba(224, 179, 77, 0.2), rgba(255, 255, 255, 0.92));
+  background: linear-gradient(145deg, #1a8f78 0%, #0a3f36 100%);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.stat-chip.accent strong,
+.stat-chip.accent span {
+  color: #ffffff;
+}
+
+.stat-chip.accent span {
+  color: rgba(255, 255, 255, 0.88);
 }
 
 .page-section {
@@ -598,11 +607,8 @@ input {
   margin: 0.2rem 0 0.1rem;
   padding: 2.8rem 1.5rem;
   border-radius: 20px;
-  border: 1px dashed rgba(26, 143, 120, 0.28);
-  background:
-    radial-gradient(circle at 85% 20%, rgba(224, 179, 77, 0.14), transparent 35%),
-    radial-gradient(circle at 15% 80%, rgba(26, 143, 120, 0.1), transparent 40%),
-    linear-gradient(180deg, #f4fbf8, #ffffff);
+  border: 1px solid rgba(26, 143, 120, 0.35);
+  background: #e7f4ef;
   text-align: center;
   animation: rise-in 0.5s ease both;
 }
@@ -642,12 +648,14 @@ input {
 .empty-state h2 {
   font-size: 1.55rem;
   margin-bottom: 0.45rem;
+  color: #0a3f36;
 }
 
 .empty-state p {
   margin: 0 auto 1.3rem;
   max-width: 28rem;
-  color: var(--muted);
+  color: #2f4b45;
+  font-weight: 500;
 }
 
 .loading-block {
