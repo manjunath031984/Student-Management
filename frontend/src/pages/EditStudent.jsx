@@ -50,54 +50,31 @@ function EditStudent() {
   };
 
   return (
-    <>
-      <div className="hero-band">
-        <div className="hero-copy">
-          <p className="eyebrow">Update record</p>
-          <h1>Edit student</h1>
-          <p>Refine the details for student ID {id} and save when everything looks right.</p>
-        </div>
-        <div className="hero-metrics">
-          <div className="stat-chip">
-            <strong>#{id}</strong>
-            <span>Record</span>
-          </div>
-          <div className="stat-chip accent">
-            <strong>Edit</strong>
-            <span>Mode</span>
-          </div>
-        </div>
+    <section className="panel">
+      <div className="panel-header">
+        <h1>Edit Student</h1>
       </div>
 
-      <section className="page-section narrow">
-        <div className="page-header">
-          <div>
-            <h2>Student details</h2>
-            <p className="page-subtitle">Changes apply immediately after a successful save.</p>
-          </div>
+      {loading && (
+        <div className="loading-block" aria-live="polite">
+          <div className="skeleton-row" />
+          <div className="skeleton-row" />
+          <div className="skeleton-row" />
         </div>
+      )}
 
-        {loading && (
-          <div className="loading-block" aria-live="polite">
-            <div className="skeleton-row" />
-            <div className="skeleton-row" />
-            <div className="skeleton-row" />
-          </div>
-        )}
+      {error && <p className="status-message error">{error}</p>}
+      {success && <p className="status-message success">{success}</p>}
 
-        {error && <p className="status-message error">{error}</p>}
-        {success && <p className="status-message success">{success}</p>}
-
-        {!loading && student && (
-          <StudentForm
-            initialValues={student}
-            onSubmit={handleSubmit}
-            submitLabel="Save changes"
-            busy={busy}
-          />
-        )}
-      </section>
-    </>
+      {!loading && student && (
+        <StudentForm
+          initialValues={student}
+          onSubmit={handleSubmit}
+          submitLabel="Save"
+          busy={busy}
+        />
+      )}
+    </section>
   );
 }
 

@@ -5,10 +5,10 @@ function StudentTable({ students, onDelete, deletingId }) {
     return (
       <div className="empty-state">
         <div className="empty-illustration" aria-hidden="true" />
-        <h2>Build your student roster</h2>
-        <p>No students yet. Add the first record to begin managing enrollments.</p>
+        <h2>No students found</h2>
+        <p>Add a student to get started, or clear the search filter.</p>
         <Link to="/add" className="btn btn-primary">
-          Add your first student
+          Add Student
         </Link>
       </div>
     );

@@ -81,43 +81,49 @@ function StudentForm({ initialValues, onSubmit, submitLabel, busy, cancelTo = '/
   return (
     <form className="student-form" onSubmit={handleSubmit} noValidate>
       <div className="form-grid">
-        <div className={`form-field full ${errors.name ? 'has-error' : ''}`}>
-          <label htmlFor="name">Full name</label>
+        <div className={`form-field ${errors.name ? 'has-error' : ''}`}>
+          <label htmlFor="name">
+            Name <span className="req">*</span>
+          </label>
           <input
             id="name"
             name="name"
             type="text"
-            placeholder="e.g. Rahul Sharma"
+            placeholder="Please enter name"
             value={form.name}
             onChange={handleChange}
             maxLength={100}
             disabled={busy}
           />
-          {errors.name ? <p className="field-error">{errors.name}</p> : <p className="hint">Maximum 100 characters</p>}
+          {errors.name && <p className="field-error">{errors.name}</p>}
         </div>
 
-        <div className={`form-field full ${errors.email ? 'has-error' : ''}`}>
-          <label htmlFor="email">Email address</label>
+        <div className={`form-field ${errors.email ? 'has-error' : ''}`}>
+          <label htmlFor="email">
+            E-Mail <span className="req">*</span>
+          </label>
           <input
             id="email"
             name="email"
             type="email"
-            placeholder="e.g. rahul.sharma@example.com"
+            placeholder="Please enter email"
             value={form.email}
             onChange={handleChange}
             maxLength={150}
             disabled={busy}
           />
-          {errors.email ? <p className="field-error">{errors.email}</p> : <p className="hint">We use this for student contact</p>}
+          {errors.email && <p className="field-error">{errors.email}</p>}
         </div>
 
         <div className={`form-field ${errors.course ? 'has-error' : ''}`}>
-          <label htmlFor="course">Course</label>
+          <label htmlFor="course">
+            Course <span className="req">*</span>
+          </label>
           <input
             id="course"
             name="course"
             type="text"
-            placeholder="e.g. Computer Science"
+            placeholder="Please enter course"
             value={form.course}
             onChange={handleChange}
             maxLength={100}
@@ -127,29 +133,31 @@ function StudentForm({ initialValues, onSubmit, submitLabel, busy, cancelTo = '/
         </div>
 
         <div className={`form-field ${errors.age ? 'has-error' : ''}`}>
-          <label htmlFor="age">Age</label>
+          <label htmlFor="age">
+            Age <span className="req">*</span>
+          </label>
           <input
             id="age"
             name="age"
             type="number"
             min="1"
             max="100"
-            placeholder="18"
+            placeholder="Please enter age"
             value={form.age}
             onChange={handleChange}
             disabled={busy}
           />
-          {errors.age ? <p className="field-error">{errors.age}</p> : <p className="hint">Between 1 and 100</p>}
+          {errors.age && <p className="field-error">{errors.age}</p>}
         </div>
       </div>
 
       <div className="form-actions">
+        <Link to={cancelTo} className="btn btn-cancel">
+          Cancel
+        </Link>
         <button type="submit" className="btn btn-primary" disabled={busy}>
           {busy ? 'Saving...' : submitLabel}
         </button>
-        <Link to={cancelTo} className="btn btn-secondary">
-          Cancel
-        </Link>
       </div>
     </form>
   );

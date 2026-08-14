@@ -30,39 +30,16 @@ function AddStudent() {
   };
 
   return (
-    <>
-      <div className="hero-band">
-        <div className="hero-copy">
-          <p className="eyebrow">New enrollment</p>
-          <h1>Add a student</h1>
-          <p>Capture name, email, course, and age to create a complete student profile.</p>
-        </div>
-        <div className="hero-metrics">
-          <div className="stat-chip">
-            <strong>+</strong>
-            <span>Create</span>
-          </div>
-          <div className="stat-chip accent">
-            <strong>4</strong>
-            <span>Fields</span>
-          </div>
-        </div>
+    <section className="panel">
+      <div className="panel-header">
+        <h1>Add New Students</h1>
       </div>
 
-      <section className="page-section narrow">
-        <div className="page-header">
-          <div>
-            <h2>Student details</h2>
-            <p className="page-subtitle">All fields are required before saving.</p>
-          </div>
-        </div>
+      {error && <p className="status-message error">{error}</p>}
+      {success && <p className="status-message success">{success}</p>}
 
-        {error && <p className="status-message error">{error}</p>}
-        {success && <p className="status-message success">{success}</p>}
-
-        <StudentForm onSubmit={handleSubmit} submitLabel="Create Student" busy={busy} />
-      </section>
-    </>
+      <StudentForm onSubmit={handleSubmit} submitLabel="Save" busy={busy} />
+    </section>
   );
 }
 
