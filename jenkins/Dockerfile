@@ -23,6 +23,8 @@ RUN apt-get update \
          unzip \
          python3 \
          apt-transport-https \
+         openssl \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Apache Maven 3.5.4 only — never use the distro Maven package.
@@ -38,7 +40,7 @@ RUN curl -fsSL \
     && test -x /opt/maven/bin/mvn
 
 # Docker CLI from the official static tarball (avoids Debian-codename apt repos).
-ARG DOCKER_CLI_VERSION=28.3.3
+ARG DOCKER_CLI_VERSION=29.5.3
 RUN curl -fsSL \
       "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
       -o /tmp/docker.tgz \
@@ -103,3 +105,5 @@ USER jenkins
 ENV JAVA_HOME=/opt/java/openjdk
 ENV MAVEN_HOME=/opt/maven
 ENV PATH="/opt/maven/bin:/opt/java/openjdk/bin:/usr/local/bin:${PATH}"
+# TLS 1.2+ with X25519. Do not disable certificate verification.
+ENV GODEBUG=tlsmlkem=0,http2client=0

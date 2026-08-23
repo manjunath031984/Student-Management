@@ -8,8 +8,8 @@ pipeline {
   }
 
   parameters {
-    choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Pipeline action')
-    choice(name: 'ENVIRONMENT', choices: ['dev', 'qa', 'prod'], description: 'Target environment')
+    choice(name: 'ACTION', choices: ['APPLY', 'DESTROY'], description: 'Terraform action. APPLY and DESTROY both require Jenkins approval.')
+    choice(name: 'ENVIRONMENT', choices: ['dev', 'qa', 'prod'], description: 'Target environment (dev.tfvars / qa.tfvars / prod.tfvars)')
     string(name: 'IMAGE_TAG', defaultValue: '', description: 'Immutable image tag. Defaults to BUILD_NUMBER. Never use latest.')
     string(name: 'TERRAFORM_VERSION', defaultValue: '1.13.5', description: 'Terraform 1.13.x')
     string(name: 'GCP_PROJECT_ID', defaultValue: 'gcp-dev-july-2026', description: 'GCP project')
@@ -19,6 +19,7 @@ pipeline {
   environment {
     TF_IN_AUTOMATION = 'true'
     TF_INPUT = '0'
+    GODEBUG = 'tlsmlkem=0,http2client=0'
     JAVA_HOME = '/opt/java/openjdk'
     MAVEN_HOME = '/opt/maven'
     TF_STATE_BUCKET = 'gcp-dev-july-2026-terraform-state'
@@ -39,13 +40,13 @@ pipeline {
         script {
           if (!params.ACTION?.trim()) { error('ACTION is required') }
           if (!(params.ENVIRONMENT in ['dev', 'qa', 'prod'])) { error('ENVIRONMENT must be dev, qa, or prod') }
-          if (!(params.ACTION in ['plan', 'apply', 'destroy'])) { error('ACTION must be plan, apply, or destroy') }
+          if (!(params.ACTION in ['APPLY', 'DESTROY'])) { error('ACTION must be APPLY or DESTROY') }
           env.IMAGE_TAG = params.IMAGE_TAG?.trim() ? params.IMAGE_TAG.trim() : "${env.BUILD_NUMBER}"
           if (env.IMAGE_TAG == 'latest') { error('IMAGE_TAG must not be latest') }
           env.CLUSTER_NAME = "gke-student-mgmt-${params.ENVIRONMENT}"
           env.TF_VAR_FILE = "environments/${params.ENVIRONMENT}.tfvars"
           env.TF_BACKEND_FILE = "backend/${params.ENVIRONMENT}.tfbackend"
-          echo "ACTION=${params.ACTION} ENVIRONMENT=${params.ENVIRONMENT} IMAGE_TAG=${env.IMAGE_TAG} CLUSTER=${env.CLUSTER_NAME}"
+          echo "ACTION=${params.ACTION} ENVIRONMENT=${params.ENVIRONMENT} IMAGE_TAG=${env.IMAGE_TAG} CLUSTER=${env.CLUSTER_NAME} TF_VAR_FILE=${env.TF_VAR_FILE}"
         }
       }
     }
@@ -68,6 +69,7 @@ pipeline {
     }
 
     stage('Java Validation') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -83,6 +85,7 @@ pipeline {
     }
 
     stage('Maven Validation') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -103,17 +106,24 @@ pipeline {
     }
 
     stage('Docker Validation') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
-          docker --version
+          docker version
           docker info
+          gcloud version
+          gcloud auth list
+          gcloud config get-value project
+          env | grep -i proxy || true
+          env | grep -i no_proxy || true
+          curl -Iv https://us-central1-docker.pkg.dev/v2/ || true
         '''
       }
     }
 
-    stage('Application Validation') {
-      when { expression { params.ACTION != 'destroy' } }
+    stage('Application Tests') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         dir('backend') {
           sh '''
@@ -135,8 +145,8 @@ pipeline {
       }
     }
 
-    stage('Container Image Build') {
-      when { expression { params.ACTION != 'destroy' } }
+    stage('Docker Build') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -147,28 +157,7 @@ pipeline {
       }
     }
 
-    stage('Verify Terraform') {
-      steps {
-        sh '''
-          set -euo pipefail
-          TFV="${TERRAFORM_VERSION}"
-          case "${TFV}" in
-            1.13.*) ;;
-            *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
-          esac
-          terraform version
-          TF_LINE=$(terraform version | head -n 1)
-          echo "Detected Terraform: ${TF_LINE}"
-          echo "${TF_LINE}" | grep -q "Terraform v1.13" || {
-            echo "ERROR: Terraform 1.13.x is required"
-            exit 1
-          }
-        '''
-      }
-    }
-
-    stage('Terraform Code Validation') {
-      when { expression { params.ACTION != 'destroy' } }
+    stage('Terraform Format') {
       steps {
         dir('terraform') {
           sh '''
@@ -277,13 +266,37 @@ pipeline {
       }
     }
 
+    stage('Terraform Init') {
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              TFV="${TERRAFORM_VERSION}"
+              case "${TFV}" in
+                1.13.*) ;;
+                *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
+              esac
+              terraform version
+              TF_LINE=$(terraform version | head -n 1)
+              echo "Detected Terraform: ${TF_LINE}"
+              echo "${TF_LINE}" | grep -q "Terraform v1.13" || {
+                echo "ERROR: Terraform 1.13.x is required"
+                exit 1
+              }
+              terraform init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
+            '''
+          }
+        }
+      }
+    }
+
     stage('Terraform Validate') {
       steps {
         dir('terraform') {
           withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              terraform init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
               terraform validate
             '''
           }
@@ -292,126 +305,191 @@ pipeline {
     }
 
     stage('Terraform Plan') {
-      when { expression { params.ACTION == 'plan' || params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         dir('terraform') {
           withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              terraform plan -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
+              terraform plan -input=false -var-file="${TF_VAR_FILE}"
             '''
           }
         }
       }
     }
 
-    stage('Manual Approval') {
-      when {
-        anyOf {
-          expression { params.ACTION == 'apply' && params.ENVIRONMENT == 'prod' }
-          expression { params.ACTION == 'destroy' }
-        }
-      }
+    stage('Terraform Apply Approval') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         script {
-          def msg = params.ACTION == 'destroy'
-            ? "Approve ${params.ENVIRONMENT.toUpperCase()} Terraform DESTROY? This deletes GKE and related GCP infrastructure."
-            : 'Approve PRODUCTION infrastructure deployment?'
           timeout(time: 30, unit: 'MINUTES') {
-            input message: msg
-          }
-        }
-      }
-    }
+            input(
+              message: """Terraform Plan completed successfully.
 
-    stage('Destroy Plan') {
-      when { expression { params.ACTION == 'destroy' } }
-      steps {
-        dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-            sh '''
-              set -euo pipefail
-              terraform plan -destroy -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
-            '''
+GCP Project:
+gcp-dev-july-2026
+
+Environment:
+${params.ENVIRONMENT}
+
+Do you want to APPLY the Terraform infrastructure?""",
+              ok: 'Apply Infrastructure'
+            )
           }
         }
       }
     }
 
     stage('Terraform Apply') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         dir('terraform') {
           withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              terraform apply -input=false tfplan
+              terraform apply -input=false -auto-approve -var-file="${TF_VAR_FILE}"
             '''
+          }
+        }
+      }
+    }
+
+    stage('Terraform Destroy Plan') {
+      when { expression { params.ACTION == 'DESTROY' } }
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              terraform plan -destroy -input=false -var-file="${TF_VAR_FILE}"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Terraform Destroy Approval') {
+      when { expression { params.ACTION == 'DESTROY' } }
+      steps {
+        script {
+          timeout(time: 30, unit: 'MINUTES') {
+            input(
+              message: """WARNING: Terraform DESTROY will permanently remove infrastructure.
+
+GCP Project:
+gcp-dev-july-2026
+
+Environment:
+${params.ENVIRONMENT}
+
+Are you sure you want to DESTROY the Terraform infrastructure?""",
+              ok: 'DESTROY Infrastructure'
+            )
           }
         }
       }
     }
 
     stage('Terraform Destroy') {
-      when { expression { params.ACTION == 'destroy' } }
+      when { expression { params.ACTION == 'DESTROY' } }
       steps {
         dir('terraform') {
           withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              terraform apply -input=false tfplan
+              terraform destroy -input=false -auto-approve -var-file="${TF_VAR_FILE}"
             '''
           }
         }
       }
     }
 
+    stage('Destroy Verification') {
+      when { expression { params.ACTION == 'DESTROY' } }
+      steps {
+        withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            echo "Destroy completed. Remaining GKE clusters (filter=${CLUSTER_NAME}):"
+            gcloud container clusters list \
+              --project=gcp-dev-july-2026 \
+              --filter="name=${CLUSTER_NAME}" \
+              --format="table(name,location,status)" || true
+          '''
+        }
+      }
+    }
+
     stage('GKE Authentication') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
-        sh '''
-          set -euo pipefail
-          gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-            --region="${GCP_REGION}" \
-            --project="${GCP_PROJECT_ID}"
-          kubectl get nodes -o wide
-        '''
+        withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+              --region="${GCP_REGION}" \
+              --project="${GCP_PROJECT_ID}"
+            kubectl get nodes -o wide
+          '''
+        }
       }
     }
 
-    stage('Artifact Registry Authentication') {
-      when { expression { params.ACTION == 'apply' } }
+    stage('Docker Registry Authentication') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
-        sh '''
-          set -euo pipefail
-          gcloud auth configure-docker "${AR_HOST}" --quiet
-        '''
+        withCredentials([
+          file(
+            credentialsId: 'gcp-infra-admin',
+            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
+          )
+        ]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            gcloud artifacts repositories describe student-management \
+              --location=us-central1 \
+              --project=gcp-dev-july-2026
+            gcloud auth configure-docker "${AR_HOST}" --quiet
+          '''
+        }
       }
     }
 
-    stage('Push Backend Image') {
-      when { expression { params.ACTION == 'apply' } }
+    stage('Docker Push') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
-        sh 'docker push "${AR_REPO}/student-management-backend:${IMAGE_TAG}"'
-      }
-    }
-
-    stage('Push Frontend Image') {
-      when { expression { params.ACTION == 'apply' } }
-      steps {
-        sh 'docker push "${AR_REPO}/student-management-frontend:${IMAGE_TAG}"'
+        withCredentials([
+          file(
+            credentialsId: 'gcp-infra-admin',
+            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
+          )
+        ]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            docker push "${AR_REPO}/student-management-backend:${IMAGE_TAG}"
+            docker push "${AR_REPO}/student-management-frontend:${IMAGE_TAG}"
+          '''
+        }
       }
     }
 
     stage('Deploy Namespace') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh 'kubectl apply -f "${K8S_DIR}/namespace.yaml"'
       }
     }
 
     stage('Deploy PostgreSQL') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         withCredentials([string(credentialsId: 'student-management-postgres-password', variable: 'POSTGRES_PASSWORD')]) {
           sh '''
@@ -430,7 +508,7 @@ pipeline {
     }
 
     stage('Wait for PostgreSQL') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -441,7 +519,7 @@ pipeline {
     }
 
     stage('Deploy Backend') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         withCredentials([string(credentialsId: 'student-management-postgres-password', variable: 'POSTGRES_PASSWORD')]) {
           sh '''
@@ -459,7 +537,7 @@ pipeline {
     }
 
     stage('Deploy Frontend') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -471,7 +549,7 @@ pipeline {
     }
 
     stage('Deploy Gateway') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -486,14 +564,14 @@ pipeline {
     }
 
     stage('Deploy HTTPRoute') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh 'kubectl apply -f "${K8S_DIR}/http-route.yaml"'
       }
     }
 
     stage('Verify Nodes') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -508,7 +586,7 @@ pipeline {
     }
 
     stage('Verify PostgreSQL') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -521,7 +599,7 @@ pipeline {
     }
 
     stage('Verify Services') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -538,7 +616,7 @@ pipeline {
     }
 
     stage('Verify Gateway') {
-      when { expression { params.ACTION == 'apply' } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
@@ -563,8 +641,8 @@ pipeline {
       }
     }
 
-    stage('Verify Application') {
-      when { expression { params.ACTION == 'apply' } }
+    stage('Deployment Verification') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
           set -euo pipefail
