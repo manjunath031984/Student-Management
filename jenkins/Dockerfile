@@ -54,6 +54,7 @@ RUN curl -fsSL \
 
 # Docker CLI from the official static tarball (avoids Debian-codename apt repos).
 ARG DOCKER_CLI_VERSION=29.5.3
+ARG BUILDX_VERSION=0.26.1
 RUN curl -fsSL \
       "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
       -o /tmp/docker.tgz \
@@ -61,6 +62,12 @@ RUN curl -fsSL \
     && mv /tmp/docker/docker /usr/local/bin/docker \
     && chmod +x /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz \
+    && mkdir -p /usr/local/lib/docker/cli-plugins /usr/libexec/docker/cli-plugins \
+    && curl -fsSL \
+         "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-amd64" \
+         -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && ln -sfn /usr/local/lib/docker/cli-plugins/docker-buildx /usr/libexec/docker/cli-plugins/docker-buildx \
     && groupadd -f docker \
     && usermod -aG docker jenkins
 

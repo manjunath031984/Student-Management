@@ -456,6 +456,11 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
               --location=us-central1 \
               --project=gcp-dev-july-2026
             gcloud auth configure-docker "${AR_HOST}" --quiet
+            if ! docker buildx inspect student-mgmt-ar >/dev/null 2>&1; then
+              docker buildx create --name student-mgmt-ar --driver docker-container \
+                --driver-opt env.GODEBUG=tlsmlkem=0
+            fi
+            docker buildx inspect student-mgmt-ar --bootstrap
           '''
         }
       }
@@ -474,8 +479,18 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
             set -euo pipefail
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project gcp-dev-july-2026
-            docker push "${AR_REPO}/student-management-backend:${IMAGE_TAG}"
-            docker push "${AR_REPO}/student-management-frontend:${IMAGE_TAG}"
+            for img in \
+              "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
+              "${AR_REPO}/student-management-frontend:${IMAGE_TAG}"
+            do
+              printf 'FROM %s\n' "${img}" | docker buildx build \
+                --builder student-mgmt-ar \
+                --push \
+                --provenance=false \
+                --sbom=false \
+                -t "${img}" \
+                -
+            done
           '''
         }
       }
