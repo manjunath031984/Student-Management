@@ -49,30 +49,65 @@ pipeline {
       }
     }
 
-    stage('Validate Java 17 and Maven 3.5.4') {
+    stage('GCP Authentication') {
+      steps {
+        withCredentials([
+          file(
+            credentialsId: 'gcp-infra-admin',
+            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
+          )
+        ]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+          '''
+        }
+      }
+    }
+
+    stage('Java Validation') {
       steps {
         sh '''
           set -euo pipefail
           echo "JAVA_HOME=${JAVA_HOME:-}"
-          java -version
-          mvn -version
-          java -version 2>&1 | grep -E 'version "17(\.|$)'
-          mvn -version | grep -F "Apache Maven 3.5.4"
-          mvn -version | grep -E "Java version: 17(\\.|$)"
+          JAVA_VERSION=$(java -version 2>&1 | head -n 1)
+          echo "Detected Java: ${JAVA_VERSION}"
+          echo "${JAVA_VERSION}" | grep -q 'version "17' || {
+            echo "ERROR: Java 17 is required"
+            exit 1
+          }
         '''
       }
     }
 
-    stage('GCP Authentication') {
+    stage('Maven Validation') {
       steps {
-        withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-          sh '''
-            set -euo pipefail
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project "${GCP_PROJECT_ID}"
-            gcloud auth list --filter=status:ACTIVE --format="value(account)"
-          '''
-        }
+        sh '''
+          set -euo pipefail
+          MVN_VERSION=$(mvn -version | head -n 1)
+          echo "Detected Maven: ${MVN_VERSION}"
+          echo "${MVN_VERSION}" | grep -q "Apache Maven 3.5.4" || {
+            echo "ERROR: Apache Maven 3.5.4 is required"
+            exit 1
+          }
+          MVN_JAVA=$(mvn -version | grep "Java version:" | head -n 1)
+          echo "Detected Maven Java: ${MVN_JAVA}"
+          echo "${MVN_JAVA}" | grep -q "Java version: 17" || {
+            echo "ERROR: Maven must run on Java 17"
+            exit 1
+          }
+        '''
+      }
+    }
+
+    stage('Docker Validation') {
+      steps {
+        sh '''
+          set -euo pipefail
+          docker --version
+          docker info
+        '''
       }
     }
 
@@ -121,7 +156,12 @@ pipeline {
             *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
           esac
           terraform version
-          terraform version | head -n 1 | grep -F "Terraform v${TFV}" || terraform version | head -n 1 | grep -E "Terraform v1\\.13\\."
+          TF_LINE=$(terraform version | head -n 1)
+          echo "Detected Terraform: ${TF_LINE}"
+          echo "${TF_LINE}" | grep -q "Terraform v1.13" || {
+            echo "ERROR: Terraform 1.13.x is required"
+            exit 1
+          }
         '''
       }
     }
@@ -141,7 +181,7 @@ pipeline {
     stage('Phase 2 — Terraform Validate') {
       steps {
         dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
               terraform init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
@@ -156,7 +196,7 @@ pipeline {
       when { expression { params.ACTION == 'plan' || params.ACTION == 'apply' } }
       steps {
         dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
               terraform plan -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
@@ -189,7 +229,7 @@ pipeline {
       when { expression { params.ACTION == 'destroy' } }
       steps {
         dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
               terraform plan -destroy -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
@@ -203,7 +243,7 @@ pipeline {
       when { expression { params.ACTION == 'apply' } }
       steps {
         dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
               terraform apply -input=false tfplan
@@ -217,7 +257,7 @@ pipeline {
       when { expression { params.ACTION == 'destroy' } }
       steps {
         dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
               terraform apply -input=false tfplan
