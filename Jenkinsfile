@@ -179,7 +179,7 @@ pipeline {
       }
     }
 
-    stage('Ensure Terraform State Bucket') {
+    stage('Terraform State Bucket') {
       steps {
         withCredentials([
           file(
@@ -189,15 +189,18 @@ pipeline {
         ]) {
           sh '''
             set -euo pipefail
-            PROJECT="${GCP_PROJECT_ID}"
-            BUCKET="${TF_STATE_BUCKET}"
-            REGION="${GCP_REGION}"
+            PROJECT="gcp-dev-july-2026"
+            BUCKET="gcp-dev-july-2026-terraform-state"
+            REGION="us-central1"
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project "${PROJECT}"
             gcloud services enable storage.googleapis.com --project="${PROJECT}"
             if gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}" >/dev/null 2>&1; then
-              echo "Terraform state bucket gs://${BUCKET} already exists"
+              echo "Terraform state bucket already exists:"
+              echo "gs://${BUCKET}"
             else
-              echo "Creating Terraform state bucket gs://${BUCKET}"
+              echo "Creating Terraform state bucket:"
+              echo "gs://${BUCKET}"
               gcloud storage buckets create "gs://${BUCKET}" \
                 --project="${PROJECT}" \
                 --location="${REGION}" \
@@ -205,9 +208,38 @@ pipeline {
                 --pap
               gcloud storage buckets update "gs://${BUCKET}" \
                 --project="${PROJECT}" \
-                --versioning \
-                --pap
+                --versioning
             fi
+            echo "Verifying Terraform state bucket..."
+            gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}"
+            LOCATION=$(gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}" --format="value(location)")
+            UBLA=$(gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}" --format="value(iam_configuration.uniform_bucket_level_access.enabled)")
+            PAP=$(gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}" --format="value(iam_configuration.public_access_prevention)")
+            echo "location=${LOCATION}"
+            echo "uniform_bucket_level_access=${UBLA}"
+            echo "public_access_prevention=${PAP}"
+            case "${LOCATION}" in
+              US-CENTRAL1|us-central1) ;;
+              *)
+                echo "ERROR: bucket location must be us-central1"
+                exit 1
+                ;;
+            esac
+            case "${UBLA}" in
+              True|true) ;;
+              *)
+                echo "ERROR: uniform bucket-level access must be enabled"
+                exit 1
+                ;;
+            esac
+            case "${PAP}" in
+              enforced|ENFORCED) ;;
+              *)
+                echo "ERROR: public access prevention must be enabled"
+                exit 1
+                ;;
+            esac
+            echo "Terraform state bucket verification completed."
           '''
         }
       }
