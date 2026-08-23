@@ -1,0 +1,41 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: frontend-healthcheck
+  namespace: student-management
+spec:
+  default:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /
+        port: 80
+  targetRef:
+    group: ""
+    kind: Service
+    name: frontend-service
+---
+# Spring Boot has no actuator in this repository. Probe TCP/8080 instead of HTTP /.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: backend-healthcheck
+  namespace: student-management
+spec:
+  default:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    config:
+      type: TCP
+      tcpHealthCheck:
+        port: 8080
+  targetRef:
+    group: ""
+    kind: Service
+    name: backend-service

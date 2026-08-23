@@ -1,0 +1,19 @@
+# GKE creates GatewayClass objects when Gateway API is enabled on the cluster
+# (terraform/modules/gke gateway_api_config.channel = CHANNEL_STANDARD).
+#
+# Do not invent a custom class. The regional external Application Load Balancer
+# class for this GKE Standard regional cluster is:
+#
+#   gke-l7-regional-external-managed
+#   controller: networking.gke.io/gateway
+#
+# Jenkins verifies the class exists with:
+#   kubectl get gatewayclass gke-l7-regional-external-managed
+#
+# Applying this manifest is skipped if the GKE-managed class already exists.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: gke-l7-regional-external-managed
+spec:
+  controllerName: networking.gke.io/gateway

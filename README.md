@@ -8,7 +8,7 @@
 
 This project manages student records through a React user interface and a Spring Boot REST API backed by PostgreSQL running on Windows.
 
-It is designed for local development and learning. It does **not** use authentication, cloud services, Kubernetes, or Docker Compose.
+It is designed for local development and learning. Local Docker still does **not** use Docker Compose. GCP/GKE deployment is documented in [`terraform/README.md`](terraform/README.md) and orchestrated by the root `Jenkinsfile`.
 
 ## 3. Features
 
