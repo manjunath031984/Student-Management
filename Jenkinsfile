@@ -19,6 +19,8 @@ pipeline {
   environment {
     TF_IN_AUTOMATION = 'true'
     TF_INPUT = '0'
+    JAVA_HOME = '/opt/java/openjdk'
+    MAVEN_HOME = '/opt/maven'
     K8S_DIR = 'terraform/kubernetes'
     AR_HOST = 'us-central1-docker.pkg.dev'
     AR_REPO = 'us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management'
@@ -47,6 +49,20 @@ pipeline {
       }
     }
 
+    stage('Validate Java 17 and Maven 3.5.4') {
+      steps {
+        sh '''
+          set -euo pipefail
+          echo "JAVA_HOME=${JAVA_HOME:-}"
+          java -version
+          mvn -version
+          java -version 2>&1 | grep -E 'version "17(\.|$)'
+          mvn -version | grep -F "Apache Maven 3.5.4"
+          mvn -version | grep -E "Java version: 17(\\.|$)"
+        '''
+      }
+    }
+
     stage('GCP Authentication') {
       steps {
         withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
@@ -67,8 +83,9 @@ pipeline {
           sh '''
             set -euo pipefail
             java -version
+            mvn -version
             mvn -B clean test
-            mvn -B clean package -DskipTests=false
+            mvn -B clean package
           '''
         }
         dir('frontend') {
@@ -94,7 +111,7 @@ pipeline {
       }
     }
 
-    stage('Install Terraform') {
+    stage('Verify Terraform') {
       steps {
         sh '''
           set -euo pipefail
@@ -103,14 +120,8 @@ pipeline {
             1.13.*) ;;
             *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
           esac
-          mkdir -p "${WORKSPACE}/.tools"
-          if [ ! -x "${WORKSPACE}/.tools/terraform" ]; then
-            curl -fsSL -o /tmp/terraform.zip \
-              "https://releases.hashicorp.com/terraform/${TFV}/terraform_${TFV}_linux_amd64.zip"
-            unzip -o /tmp/terraform.zip -d "${WORKSPACE}/.tools"
-            chmod +x "${WORKSPACE}/.tools/terraform"
-          fi
-          "${WORKSPACE}/.tools/terraform" version
+          terraform version
+          terraform version | head -n 1 | grep -F "Terraform v${TFV}" || terraform version | head -n 1 | grep -E "Terraform v1\\.13\\."
         '''
       }
     }
@@ -121,7 +132,7 @@ pipeline {
         dir('terraform') {
           sh '''
             set -euo pipefail
-            "${WORKSPACE}/.tools/terraform" fmt -check -recursive
+            terraform fmt -check -recursive
           '''
         }
       }
@@ -133,8 +144,8 @@ pipeline {
           withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              "${WORKSPACE}/.tools/terraform" init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
-              "${WORKSPACE}/.tools/terraform" validate
+              terraform init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
+              terraform validate
             '''
           }
         }
@@ -148,7 +159,7 @@ pipeline {
           withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              "${WORKSPACE}/.tools/terraform" plan -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
+              terraform plan -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
             '''
           }
         }
@@ -181,7 +192,7 @@ pipeline {
           withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              "${WORKSPACE}/.tools/terraform" plan -destroy -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
+              terraform plan -destroy -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
             '''
           }
         }
@@ -195,7 +206,7 @@ pipeline {
           withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              "${WORKSPACE}/.tools/terraform" apply -input=false tfplan
+              terraform apply -input=false tfplan
             '''
           }
         }
@@ -209,7 +220,7 @@ pipeline {
           withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
             sh '''
               set -euo pipefail
-              "${WORKSPACE}/.tools/terraform" apply -input=false tfplan
+              terraform apply -input=false tfplan
             '''
           }
         }
