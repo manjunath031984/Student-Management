@@ -112,7 +112,7 @@ pipeline {
       }
     }
 
-    stage('Phase 1 — Application Tests') {
+    stage('Application Validation') {
       when { expression { params.ACTION != 'destroy' } }
       steps {
         dir('backend') {
@@ -135,7 +135,7 @@ pipeline {
       }
     }
 
-    stage('Phase 1 — Docker Build') {
+    stage('Container Image Build') {
       when { expression { params.ACTION != 'destroy' } }
       steps {
         sh '''
@@ -167,7 +167,7 @@ pipeline {
       }
     }
 
-    stage('Phase 2 — Terraform Format') {
+    stage('Terraform Code Validation') {
       when { expression { params.ACTION != 'destroy' } }
       steps {
         dir('terraform') {
@@ -210,7 +210,7 @@ pipeline {
       }
     }
 
-    stage('Phase 2 — Terraform Validate') {
+    stage('Terraform Validate') {
       steps {
         dir('terraform') {
           withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
@@ -224,7 +224,7 @@ pipeline {
       }
     }
 
-    stage('Phase 2 — Terraform Plan') {
+    stage('Terraform Plan') {
       when { expression { params.ACTION == 'plan' || params.ACTION == 'apply' } }
       steps {
         dir('terraform') {
