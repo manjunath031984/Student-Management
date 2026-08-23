@@ -202,8 +202,11 @@ pipeline {
                 --project="${PROJECT}" \
                 --location="${REGION}" \
                 --uniform-bucket-level-access \
-                --public-access-prevention=enforced
-              gcloud storage buckets update "gs://${BUCKET}" --versioning --project="${PROJECT}"
+                --pap
+              gcloud storage buckets update "gs://${BUCKET}" \
+                --project="${PROJECT}" \
+                --versioning \
+                --pap
             fi
           '''
         }
