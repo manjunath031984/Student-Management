@@ -5,7 +5,7 @@ cluster_name      = "gke-student-mgmt-qa"
 infra_admin_email = "infra-admin@gcp-dev-july-2026.iam.gserviceaccount.com"
 
 network_name = "gke-vpc"
-subnet_name  = "Gke-subnet"
+subnet_name  = "gke-subnet"
 subnet_cidr  = "192.168.0.0/24"
 
 pods_range_name     = "gke-pods"

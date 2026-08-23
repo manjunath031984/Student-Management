@@ -73,7 +73,7 @@ Application ports and API paths come from the existing repository:
 |--------|----------------|
 | `modules/project-services` | Enable GCP APIs (idempotent) |
 | `modules/iam` | Least-privilege roles for `infra-admin` and the GKE node SA |
-| `modules/network` | VPC `gke-vpc`, subnet `Gke-subnet`, secondary ranges, proxy-only subnet |
+| `modules/network` | VPC `gke-vpc`, subnet `gke-subnet`, secondary ranges, proxy-only subnet |
 | `modules/firewall` | Direct SSH TCP/22 and GCP health checks (not PostgreSQL) |
 | `modules/artifact-registry` | Docker repo `student-management` |
 | `modules/gke` | Regional Standard cluster + one node pool |
@@ -126,7 +126,7 @@ If apply fails with a missing permission: identify the exact permission, add onl
 
 ## 7. Subnet
 
-- Name: `Gke-subnet`
+- Name: `gke-subnet`
 - Region: `us-central1`
 - CIDR: `192.168.0.0/24`
 - `private_ip_google_access = true`
@@ -170,7 +170,7 @@ gcloud compute ssh INSTANCE --zone=us-central1-b
 
 - Standard regional cluster (not Autopilot)
 - Names: `gke-student-mgmt-dev` / `-qa` / `-prod`
-- Network `gke-vpc`, subnet `Gke-subnet`
+- Network `gke-vpc`, subnet `gke-subnet`
 - Workload Identity, Cloud Logging, Cloud Monitoring
 - Gateway API channel: `CHANNEL_STANDARD`
 

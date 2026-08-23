@@ -29,7 +29,7 @@ variable "network_name" {
 variable "subnet_name" {
   description = "GKE subnet name."
   type        = string
-  default     = "Gke-subnet"
+  default     = "gke-subnet"
 }
 
 variable "subnet_cidr" {
