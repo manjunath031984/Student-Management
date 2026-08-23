@@ -21,6 +21,7 @@ pipeline {
     TF_INPUT = '0'
     JAVA_HOME = '/opt/java/openjdk'
     MAVEN_HOME = '/opt/maven'
+    TF_STATE_BUCKET = 'gcp-dev-july-2026-terraform-state'
     K8S_DIR = 'terraform/kubernetes'
     AR_HOST = 'us-central1-docker.pkg.dev'
     AR_REPO = 'us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management'
@@ -173,6 +174,37 @@ pipeline {
           sh '''
             set -euo pipefail
             terraform fmt -check -recursive
+          '''
+        }
+      }
+    }
+
+    stage('Ensure Terraform State Bucket') {
+      steps {
+        withCredentials([
+          file(
+            credentialsId: 'gcp-infra-admin',
+            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
+          )
+        ]) {
+          sh '''
+            set -euo pipefail
+            PROJECT="${GCP_PROJECT_ID}"
+            BUCKET="${TF_STATE_BUCKET}"
+            REGION="${GCP_REGION}"
+            gcloud config set project "${PROJECT}"
+            gcloud services enable storage.googleapis.com --project="${PROJECT}"
+            if gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}" >/dev/null 2>&1; then
+              echo "Terraform state bucket gs://${BUCKET} already exists"
+            else
+              echo "Creating Terraform state bucket gs://${BUCKET}"
+              gcloud storage buckets create "gs://${BUCKET}" \
+                --project="${PROJECT}" \
+                --location="${REGION}" \
+                --uniform-bucket-level-access \
+                --public-access-prevention=enforced
+              gcloud storage buckets update "gs://${BUCKET}" --versioning --project="${PROJECT}"
+            fi
           '''
         }
       }

@@ -25,6 +25,7 @@ locals {
     "roles/logging.configWriter",
     "roles/monitoring.editor",
     "roles/storage.objectAdmin",
+    "roles/storage.admin",
   ]
 
   node_roles = [

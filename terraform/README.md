@@ -107,6 +107,7 @@ Roles granted to infra-admin (no Owner/Editor):
 - `roles/logging.configWriter`
 - `roles/monitoring.editor`
 - `roles/storage.objectAdmin`
+- `roles/storage.admin` (create/configure the Terraform state bucket `gcp-dev-july-2026-terraform-state` before `terraform init`)
 
 Node service account `gke-student-mgmt-nodes`:
 
@@ -412,6 +413,7 @@ Jenkins `ACTION=destroy` shows the destroy plan and requires approval. It does n
 | SSH timeout | Firewall `gke-student-mgmt-allow-ssh`, tag `gke-student-mgmt-ssh`, no IAP |
 | Permission denied on apply | Add only the missing IAM role and document it in section 5 |
 | `fmt` fails | `terraform fmt -recursive` |
+| `storage: bucket doesn't exist` | Jenkins must create `gcp-dev-july-2026-terraform-state` before `terraform init`. Grant `infra-admin` `roles/storage.admin` if bucket create returns 403. |
 
 ## Outputs
 
