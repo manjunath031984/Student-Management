@@ -200,51 +200,78 @@ pipeline {
 
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project "${PROJECT}"
+
+            echo "Enabling Cloud Storage API..."
             gcloud services enable storage.googleapis.com --project="${PROJECT}"
 
             if gcloud storage buckets describe "gs://${BUCKET}" --project="${PROJECT}" >/dev/null 2>&1; then
-              echo "Bucket already exists:"
-              echo "gs://${BUCKET}"
+              echo "Terraform state bucket already exists."
             else
-              echo "Creating bucket:"
-              echo "gs://${BUCKET}"
+              echo "Creating Terraform state bucket..."
               gcloud storage buckets create "gs://${BUCKET}" \
                 --project="${PROJECT}" \
                 --location="${REGION}" \
                 --uniform-bucket-level-access \
                 --pap
-              gcloud storage buckets update "gs://${BUCKET}" \
-                --project="${PROJECT}" \
-                --versioning
             fi
 
-            echo "Retrieving bucket configuration..."
-            gcloud storage buckets describe "gs://${BUCKET}" \
-              --project="${PROJECT}" \
-              --format=json > bucket-config.json
-
-            echo "Bucket configuration:"
-            cat bucket-config.json
-
-            echo "Ensuring required bucket settings..."
-            gcloud storage buckets update "gs://${BUCKET}" \
-              --project="${PROJECT}" \
-              --uniform-bucket-level-access \
-              --pap \
-              --versioning
-
-            echo "Retrieving bucket configuration after update..."
-            gcloud storage buckets describe "gs://${BUCKET}" \
-              --project="${PROJECT}" \
-              --format=json > bucket-config.json
-
-            echo "Bucket configuration:"
-            cat bucket-config.json
-
             echo "Validating bucket configuration..."
-            python3 jenkins/scripts/validate-gcs-bucket.py bucket-config.json "${REGION}"
-            rm -f bucket-config.json
-            echo "Terraform state bucket validation PASSED."
+
+            LOCATION="$(
+              gcloud storage buckets describe "gs://${BUCKET}" \
+                --project="${PROJECT}" \
+                --format='value(location)' | tr '[:upper:]' '[:lower:]'
+            )"
+            echo "location=${LOCATION}"
+            if [ -z "${LOCATION}" ]; then
+              echo "ERROR: Unable to determine bucket location."
+              exit 1
+            fi
+            if [ "${LOCATION}" != "${REGION}" ]; then
+              echo "ERROR: Expected location=${REGION}"
+              echo "Actual location=${LOCATION}"
+              exit 1
+            fi
+
+            UNIFORM_BUCKET_LEVEL_ACCESS="$(
+              gcloud storage buckets describe "gs://${BUCKET}" \
+                --project="${PROJECT}" \
+                --format='value(uniform_bucket_level_access)'
+            )"
+            echo "uniform_bucket_level_access=${UNIFORM_BUCKET_LEVEL_ACCESS}"
+            if [ -z "${UNIFORM_BUCKET_LEVEL_ACCESS}" ]; then
+              echo "ERROR: Could not determine Uniform Bucket-Level Access."
+              exit 1
+            fi
+            case "${UNIFORM_BUCKET_LEVEL_ACCESS}" in
+              True|true)
+                echo "UNIFORM_BUCKET_LEVEL_ACCESS=ENABLED"
+                ;;
+              *)
+                echo "ERROR: Uniform Bucket-Level Access must be enabled."
+                echo "Actual=${UNIFORM_BUCKET_LEVEL_ACCESS}"
+                exit 1
+                ;;
+            esac
+
+            PUBLIC_ACCESS_PREVENTION="$(
+              gcloud storage buckets describe "gs://${BUCKET}" \
+                --project="${PROJECT}" \
+                --format='value(public_access_prevention)' | tr '[:upper:]' '[:lower:]'
+            )"
+            echo "public_access_prevention=${PUBLIC_ACCESS_PREVENTION}"
+            if [ -z "${PUBLIC_ACCESS_PREVENTION}" ]; then
+              echo "ERROR: Could not determine Public Access Prevention."
+              exit 1
+            fi
+            if [ "${PUBLIC_ACCESS_PREVENTION}" != "enforced" ]; then
+              echo "ERROR: Public Access Prevention must be enforced."
+              echo "Actual=${PUBLIC_ACCESS_PREVENTION}"
+              exit 1
+            fi
+            echo "PUBLIC_ACCESS_PREVENTION=ENFORCED"
+
+            echo "Terraform state bucket validation completed."
           '''
         }
       }
