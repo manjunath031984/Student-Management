@@ -11,6 +11,7 @@ ARG NODE_MAJOR=22
 ENV JAVA_HOME=/opt/java/openjdk
 ENV MAVEN_HOME=/opt/maven
 ENV PATH="${MAVEN_HOME}/bin:${JAVA_HOME}/bin:/usr/local/bin:${PATH}"
+ENV GODEBUG=tlsmlkem=0,tlskyber=0,http2client=0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -25,6 +26,18 @@ RUN apt-get update \
          apt-transport-https \
          openssl \
     && update-ca-certificates \
+    && sed -i '/^\[openssl_init\]$/a ssl_conf = ssl_sect' /etc/ssl/openssl.cnf \
+    && printf '%s\n' \
+         '' \
+         '[ssl_sect]' \
+         'system_default = system_default_sect' \
+         '' \
+         '[system_default_sect]' \
+         'MinProtocol = TLSv1.2' \
+         'MaxProtocol = TLSv1.3' \
+         'Groups = X25519:P-256:P-384' \
+         >> /etc/ssl/openssl.cnf \
+    && printf '%s\n' 'GODEBUG=tlsmlkem=0,tlskyber=0,http2client=0' >> /etc/environment \
     && rm -rf /var/lib/apt/lists/*
 
 # Apache Maven 3.5.4 only — never use the distro Maven package.
@@ -106,4 +119,4 @@ ENV JAVA_HOME=/opt/java/openjdk
 ENV MAVEN_HOME=/opt/maven
 ENV PATH="/opt/maven/bin:/opt/java/openjdk/bin:/usr/local/bin:${PATH}"
 # TLS 1.2+ with X25519. Do not disable certificate verification.
-ENV GODEBUG=tlsmlkem=0,http2client=0
+ENV GODEBUG=tlsmlkem=0,tlskyber=0,http2client=0

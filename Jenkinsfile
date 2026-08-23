@@ -19,7 +19,7 @@ pipeline {
   environment {
     TF_IN_AUTOMATION = 'true'
     TF_INPUT = '0'
-    GODEBUG = 'tlsmlkem=0,http2client=0'
+    GODEBUG = 'tlsmlkem=0,tlskyber=0,http2client=0'
     JAVA_HOME = '/opt/java/openjdk'
     MAVEN_HOME = '/opt/maven'
     TF_STATE_BUCKET = 'gcp-dev-july-2026-terraform-state'

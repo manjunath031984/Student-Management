@@ -14,8 +14,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     group_add:
       - "0"
+    dns:
+      - "8.8.8.8"
+      - "8.8.4.4"
     environment:
-      GODEBUG: tlsmlkem=0,http2client=0
+      GODEBUG: tlsmlkem=0,tlskyber=0,http2client=0
 
 volumes:
   jenkins_home:
