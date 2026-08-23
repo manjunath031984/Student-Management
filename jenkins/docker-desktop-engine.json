@@ -1,0 +1,14 @@
+{
+  "builder": {
+    "gc": {
+      "defaultKeepStorage": "20GB",
+      "enabled": true
+    }
+  },
+  "experimental": false,
+  "ipv6": false,
+  "dns": ["8.8.8.8", "8.8.4.4"],
+  "proxies": {
+    "no-proxy": "hubproxy.docker.internal,localhost,127.0.0.1,us-central1-docker.pkg.dev,.pkg.dev,pkg.dev,.googleapis.com,googleapis.com"
+  }
+}
