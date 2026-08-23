@@ -1,0 +1,436 @@
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '5'))
+  }
+
+  parameters {
+    choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Pipeline action')
+    choice(name: 'ENVIRONMENT', choices: ['dev', 'qa', 'prod'], description: 'Target environment')
+    string(name: 'IMAGE_TAG', defaultValue: '', description: 'Immutable image tag. Defaults to BUILD_NUMBER. Never use latest.')
+    string(name: 'TERRAFORM_VERSION', defaultValue: '1.13.5', description: 'Terraform 1.13.x')
+    string(name: 'GCP_PROJECT_ID', defaultValue: 'gcp-dev-july-2026', description: 'GCP project')
+    string(name: 'GCP_REGION', defaultValue: 'us-central1', description: 'GCP region')
+  }
+
+  environment {
+    TF_IN_AUTOMATION = 'true'
+    TF_INPUT = '0'
+    K8S_DIR = 'terraform/kubernetes'
+    AR_HOST = 'us-central1-docker.pkg.dev'
+    AR_REPO = 'us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Validate Parameters') {
+      steps {
+        script {
+          if (!params.ACTION?.trim()) { error('ACTION is required') }
+          if (!(params.ENVIRONMENT in ['dev', 'qa', 'prod'])) { error('ENVIRONMENT must be dev, qa, or prod') }
+          if (!(params.ACTION in ['plan', 'apply', 'destroy'])) { error('ACTION must be plan, apply, or destroy') }
+          env.IMAGE_TAG = params.IMAGE_TAG?.trim() ? params.IMAGE_TAG.trim() : "${env.BUILD_NUMBER}"
+          if (env.IMAGE_TAG == 'latest') { error('IMAGE_TAG must not be latest') }
+          env.CLUSTER_NAME = "gke-student-mgmt-${params.ENVIRONMENT}"
+          env.TF_VAR_FILE = "environments/${params.ENVIRONMENT}.tfvars"
+          env.TF_BACKEND_FILE = "backend/${params.ENVIRONMENT}.tfbackend"
+          echo "ACTION=${params.ACTION} ENVIRONMENT=${params.ENVIRONMENT} IMAGE_TAG=${env.IMAGE_TAG} CLUSTER=${env.CLUSTER_NAME}"
+        }
+      }
+    }
+
+    stage('GCP Authentication') {
+      steps {
+        withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project "${GCP_PROJECT_ID}"
+            gcloud auth list --filter=status:ACTIVE --format="value(account)"
+          '''
+        }
+      }
+    }
+
+    stage('Phase 1 — Application Tests') {
+      when { expression { params.ACTION != 'destroy' } }
+      steps {
+        dir('backend') {
+          sh '''
+            set -euo pipefail
+            java -version
+            mvn -B clean test
+            mvn -B clean package -DskipTests=false
+          '''
+        }
+        dir('frontend') {
+          sh '''
+            set -euo pipefail
+            npm ci
+            npm run lint
+            npm run build
+          '''
+        }
+      }
+    }
+
+    stage('Phase 1 — Docker Build') {
+      when { expression { params.ACTION != 'destroy' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          docker build -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" backend
+          docker build --build-arg VITE_API_BASE_URL=/api \
+            -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" frontend
+        '''
+      }
+    }
+
+    stage('Install Terraform') {
+      steps {
+        sh '''
+          set -euo pipefail
+          TFV="${TERRAFORM_VERSION}"
+          case "${TFV}" in
+            1.13.*) ;;
+            *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
+          esac
+          mkdir -p "${WORKSPACE}/.tools"
+          if [ ! -x "${WORKSPACE}/.tools/terraform" ]; then
+            curl -fsSL -o /tmp/terraform.zip \
+              "https://releases.hashicorp.com/terraform/${TFV}/terraform_${TFV}_linux_amd64.zip"
+            unzip -o /tmp/terraform.zip -d "${WORKSPACE}/.tools"
+            chmod +x "${WORKSPACE}/.tools/terraform"
+          fi
+          "${WORKSPACE}/.tools/terraform" version
+        '''
+      }
+    }
+
+    stage('Phase 2 — Terraform Format') {
+      when { expression { params.ACTION != 'destroy' } }
+      steps {
+        dir('terraform') {
+          sh '''
+            set -euo pipefail
+            "${WORKSPACE}/.tools/terraform" fmt -check -recursive
+          '''
+        }
+      }
+    }
+
+    stage('Phase 2 — Terraform Validate') {
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              "${WORKSPACE}/.tools/terraform" init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
+              "${WORKSPACE}/.tools/terraform" validate
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Phase 2 — Terraform Plan') {
+      when { expression { params.ACTION == 'plan' || params.ACTION == 'apply' } }
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              "${WORKSPACE}/.tools/terraform" plan -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Manual Approval') {
+      when {
+        anyOf {
+          expression { params.ACTION == 'apply' && params.ENVIRONMENT == 'prod' }
+          expression { params.ACTION == 'destroy' }
+        }
+      }
+      steps {
+        script {
+          def msg = params.ACTION == 'destroy'
+            ? "Approve ${params.ENVIRONMENT.toUpperCase()} Terraform DESTROY? This deletes GKE and related GCP infrastructure."
+            : 'Approve PRODUCTION infrastructure deployment?'
+          timeout(time: 30, unit: 'MINUTES') {
+            input message: msg
+          }
+        }
+      }
+    }
+
+    stage('Destroy Plan') {
+      when { expression { params.ACTION == 'destroy' } }
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              "${WORKSPACE}/.tools/terraform" plan -destroy -input=false -var-file="${TF_VAR_FILE}" -out=tfplan
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Terraform Apply') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              "${WORKSPACE}/.tools/terraform" apply -input=false tfplan
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Terraform Destroy') {
+      when { expression { params.ACTION == 'destroy' } }
+      steps {
+        dir('terraform') {
+          withCredentials([file(credentialsId: 'gcp-infra-admin-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+            sh '''
+              set -euo pipefail
+              "${WORKSPACE}/.tools/terraform" apply -input=false tfplan
+            '''
+          }
+        }
+      }
+    }
+
+    stage('GKE Authentication') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}"
+          kubectl get nodes -o wide
+        '''
+      }
+    }
+
+    stage('Artifact Registry Authentication') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          gcloud auth configure-docker "${AR_HOST}" --quiet
+        '''
+      }
+    }
+
+    stage('Push Backend Image') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh 'docker push "${AR_REPO}/student-management-backend:${IMAGE_TAG}"'
+      }
+    }
+
+    stage('Push Frontend Image') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh 'docker push "${AR_REPO}/student-management-frontend:${IMAGE_TAG}"'
+      }
+    }
+
+    stage('Deploy Namespace') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh 'kubectl apply -f "${K8S_DIR}/namespace.yaml"'
+      }
+    }
+
+    stage('Deploy PostgreSQL') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        withCredentials([string(credentialsId: 'student-management-postgres-password', variable: 'POSTGRES_PASSWORD')]) {
+          sh '''
+            set -euo pipefail
+            kubectl -n student-management create secret generic student-management-postgres-secret \
+              --from-literal=POSTGRES_DB=student_management \
+              --from-literal=POSTGRES_USER=student_admin \
+              --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            kubectl apply -f "${K8S_DIR}/postgres-pvc.yaml"
+            kubectl apply -f "${K8S_DIR}/postgres-statefulset.yaml"
+            kubectl apply -f "${K8S_DIR}/postgres-service.yaml"
+          '''
+        }
+      }
+    }
+
+    stage('Wait for PostgreSQL') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          kubectl -n student-management rollout status statefulset/student-management-postgres --timeout=300s
+          kubectl wait --for=condition=Ready pod/student-management-postgres-0 -n student-management --timeout=300s
+        '''
+      }
+    }
+
+    stage('Deploy Backend') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        withCredentials([string(credentialsId: 'student-management-postgres-password', variable: 'POSTGRES_PASSWORD')]) {
+          sh '''
+            set -euo pipefail
+            kubectl apply -f "${K8S_DIR}/configmap.yaml"
+            kubectl -n student-management create secret generic student-management-backend-secret \
+              --from-literal=DB_PASSWORD="${POSTGRES_PASSWORD}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/backend-deployment.yaml" | kubectl apply -f -
+            kubectl apply -f "${K8S_DIR}/backend-service.yaml"
+            kubectl -n student-management rollout status deployment/backend --timeout=300s
+          '''
+        }
+      }
+    }
+
+    stage('Deploy Frontend') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/frontend-deployment.yaml" | kubectl apply -f -
+          kubectl apply -f "${K8S_DIR}/frontend-service.yaml"
+          kubectl -n student-management rollout status deployment/frontend --timeout=300s
+        '''
+      }
+    }
+
+    stage('Deploy Gateway') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          kubectl get gatewayclass gke-l7-regional-external-managed
+          if ! kubectl get gatewayclass gke-l7-regional-external-managed >/dev/null 2>&1; then
+            kubectl apply -f "${K8S_DIR}/gateway-class.yaml"
+          fi
+          kubectl apply -f "${K8S_DIR}/gateway.yaml"
+          kubectl apply -f "${K8S_DIR}/healthcheck-policies.yaml"
+        '''
+      }
+    }
+
+    stage('Deploy HTTPRoute') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh 'kubectl apply -f "${K8S_DIR}/http-route.yaml"'
+      }
+    }
+
+    stage('Verify Nodes') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          kubectl get nodes -o wide
+          NODE_COUNT=$(kubectl get nodes --no-headers | wc -l | tr -d " ")
+          if [ "${NODE_COUNT}" != "2" ]; then
+            echo "Expected exactly 2 worker nodes, found ${NODE_COUNT}" >&2
+            exit 1
+          fi
+        '''
+      }
+    }
+
+    stage('Verify PostgreSQL') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          kubectl get statefulset -n student-management
+          kubectl get pods -n student-management
+          kubectl get pvc -n student-management
+          kubectl get svc -n student-management
+        '''
+      }
+    }
+
+    stage('Verify Services') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          for svc in frontend-service backend-service student-management-postgres; do
+            TYPE=$(kubectl -n student-management get svc "${svc}" -o jsonpath="{.spec.type}")
+            echo "${svc} type=${TYPE}"
+            if [ "${TYPE}" != "ClusterIP" ]; then
+              echo "${svc} must be ClusterIP" >&2
+              exit 1
+            fi
+          done
+        '''
+      }
+    }
+
+    stage('Verify Gateway') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          kubectl get gatewayclass
+          kubectl get gateway -n student-management
+          kubectl get httproute -n student-management
+          for i in $(seq 1 60); do
+            IP=$(kubectl -n student-management get gateway student-management-gateway \
+              -o jsonpath="{.status.addresses[0].value}" 2>/dev/null || true)
+            if [ -n "${IP}" ]; then
+              echo "Gateway address=${IP}"
+              echo "${IP}" > "${WORKSPACE}/gateway-ip.txt"
+              exit 0
+            fi
+            echo "Waiting for Gateway address (${i}/60)..."
+            sleep 10
+          done
+          echo "Gateway did not receive an address" >&2
+          kubectl -n student-management describe gateway student-management-gateway
+          exit 1
+        '''
+      }
+    }
+
+    stage('Verify Application') {
+      when { expression { params.ACTION == 'apply' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          IP=$(cat "${WORKSPACE}/gateway-ip.txt")
+          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors "http://${IP}/" | head -c 200
+          echo
+          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors "http://${IP}/api/students"
+          echo
+        '''
+      }
+    }
+  }
+
+  post {
+    failure {
+      echo 'Pipeline failed. Stop here. Do not continue to later phases, commit, or open a PR from a failed run.'
+    }
+  }
+}

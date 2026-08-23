@@ -15,6 +15,10 @@ COPY vite.config.js ./
 COPY public ./public
 COPY src ./src
 
+# Same-origin /api for GKE Gateway. Local `npm run dev` still uses localhost:8080 by default.
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 RUN npm run build
 
 # ============================================================

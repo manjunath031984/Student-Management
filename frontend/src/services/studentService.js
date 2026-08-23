@@ -1,7 +1,9 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'http://localhost:8080/api',
+  // Local Vite default: Spring Boot on localhost. GKE images bake in VITE_API_BASE_URL=/api
+  // so the browser uses the same-origin Gateway HTTPRoute (/api -> backend-service).
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api',
   headers: {
     'Content-Type': 'application/json',
   },

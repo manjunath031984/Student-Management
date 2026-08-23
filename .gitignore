@@ -44,3 +44,25 @@ ehthumbs.db
 *.tmp
 *.temp
 *~
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars.json
+
+# Credential / private-key JSON only (do not ignore application JSON)
+*-sa.json
+*service-account*.json
+*credentials*.json
+gcp-*.json
+
+# Kubernetes locally rendered secrets
+*.secret.rendered.yaml
