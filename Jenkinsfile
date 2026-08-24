@@ -393,8 +393,61 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
     stage('Terraform Destroy') {
       when { expression { params.ACTION == 'DESTROY' } }
       steps {
-        dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+        withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            # Gateway HTTPRoute backends create GKE-managed zonal NEGs on gke-vpc.
+            # Those NEGs are not Terraform resources. Delete the Kubernetes Gateway
+            # stack first so the NEG controller releases them before VPC destroy.
+            cluster_present=0
+            if gcloud container clusters describe "${CLUSTER_NAME}" \
+                 --region="${GCP_REGION}" \
+                 --project="${GCP_PROJECT_ID}" >/dev/null 2>&1; then
+              cluster_present=1
+              gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+                --region="${GCP_REGION}" \
+                --project="${GCP_PROJECT_ID}"
+              kubectl delete httproute student-management-route -n student-management --ignore-not-found --wait=true --timeout=180s
+              kubectl delete gateway student-management-gateway -n student-management --ignore-not-found --wait=true --timeout=180s
+              kubectl delete healthcheckpolicy --all -n student-management --ignore-not-found --wait=true --timeout=180s
+              kubectl delete svc backend-service frontend-service -n student-management --ignore-not-found --wait=true --timeout=180s
+              kubectl delete namespace student-management --ignore-not-found --wait=true --timeout=300s
+            else
+              echo "GKE cluster ${CLUSTER_NAME} is not present; skipping Kubernetes Gateway cleanup."
+            fi
+            released=0
+            i=1
+            max=36
+            while [ "${i}" -le "${max}" ]; do
+              neg_list="$(gcloud compute network-endpoint-groups list \
+                --project=gcp-dev-july-2026 \
+                --filter="name~k8s1- AND name~student-management" \
+                --format="value(name)")"
+              if [ -z "${neg_list}" ]; then
+                echo "GKE-managed NEGs released from gke-vpc."
+                released=1
+                break
+              fi
+              echo "Waiting for GKE-managed NEGs to detach (${i}/${max}):"
+              echo "${neg_list}"
+              i=$((i + 1))
+              sleep 10
+            done
+            if [ "${released}" -ne 1 ]; then
+              gcloud compute network-endpoint-groups list \
+                --project=gcp-dev-july-2026 \
+                --filter="name~k8s1- AND name~student-management" \
+                --format="table(name,zone,network)" >&2
+              if [ "${cluster_present}" = "1" ]; then
+                echo "ERROR: GKE-managed NEGs still using gke-vpc after Gateway cleanup." >&2
+                exit 1
+              fi
+              echo "WARNING: GKE-managed NEGs still present and the cluster is gone. Terraform VPC delete will retry."
+            fi
+          '''
+          dir('terraform') {
             sh '''
               set -euo pipefail
               terraform destroy -input=false -auto-approve -var-file="${TF_VAR_FILE}"

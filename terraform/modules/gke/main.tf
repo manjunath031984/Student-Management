@@ -3,7 +3,7 @@
 # giving Gateway-managed zonal NEGs time to detach before gke-vpc is deleted.
 resource "time_sleep" "wait_for_gke_managed_negs" {
   create_duration  = "0s"
-  destroy_duration = "5m"
+  destroy_duration = "10m"
 }
 
 resource "google_container_cluster" "this" {
