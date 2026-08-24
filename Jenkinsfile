@@ -685,11 +685,30 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
         sh '''
           set -euo pipefail
           IP=$(cat "${WORKSPACE}/gateway-ip.txt")
-          echo "Gateway address=${IP}"
+          test -n "${IP}" || {
+            echo "ERROR: Gateway IP is empty. Deployment verification cannot continue." >&2
+            exit 1
+          }
+          FRONTEND_URL="http://${IP}/"
+          BACKEND_URL="http://${IP}/api/students"
+
+          echo "============================================================"
+          echo "              DEPLOYMENT ENDPOINTS"
+          echo "============================================================"
+          echo "Frontend:"
+          echo "${FRONTEND_URL}"
+          echo "Backend API:"
+          echo "${BACKEND_URL}"
+          echo "============================================================"
+          echo "              DEPLOYMENT VERIFICATION"
+          echo "============================================================"
+          echo "Gateway IP:"
+          echo "${IP}"
+
           # Gateway IP can exist before GFE backends pass health checks (connect failures, then HTTP 503).
           max=36
           delay=10
-          for url in "http://${IP}/" "http://${IP}/api/students"; do
+          for url in "${FRONTEND_URL}" "${BACKEND_URL}"; do
             ready=0
             i=1
             while [ "${i}" -le "${max}" ]; do
@@ -715,12 +734,57 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
               exit 1
             fi
           done
-          echo "GET / (truncated):"
-          curl -sS --max-time 20 "http://${IP}/" | dd bs=1 count=200 2>/dev/null
+
+          echo "------------------------------------------------------------"
+          echo "FRONTEND ENDPOINT"
+          echo "------------------------------------------------------------"
+          echo "${FRONTEND_URL}"
+          echo "============================================================"
+          echo "FRONTEND VERIFICATION"
+          echo "============================================================"
+          echo "Endpoint: ${FRONTEND_URL}"
+          echo "Frontend response:"
+          set +e
+          frontend_all=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${FRONTEND_URL}")
+          frontend_rc=$?
+          set -e
+          frontend_code=$(printf '%s\n' "${frontend_all}" | tail -n 1)
+          frontend_payload=$(printf '%s\n' "${frontend_all}" | sed '$d')
+          printf '%s\n' "${frontend_payload}" | dd bs=1 count=200 2>/dev/null
           echo
-          echo "GET /api/students:"
-          curl -sS --fail --max-time 20 "http://${IP}/api/students"
-          echo
+          if [ "${frontend_rc}" -ne 0 ] || [ "${frontend_code}" != "200" ]; then
+            echo "Frontend verification: FAILED"
+            echo "ERROR: Frontend HTTP ${frontend_code} curl_rc=${frontend_rc}" >&2
+            exit 1
+          fi
+          echo "Frontend verification: SUCCESS"
+          echo "============================================================"
+
+          echo "------------------------------------------------------------"
+          echo "BACKEND API ENDPOINT"
+          echo "------------------------------------------------------------"
+          echo "${BACKEND_URL}"
+          echo "============================================================"
+          echo "BACKEND VERIFICATION"
+          echo "============================================================"
+          echo "Endpoint: ${BACKEND_URL}"
+          echo "Backend response:"
+          set +e
+          backend_body=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${BACKEND_URL}")
+          backend_rc=$?
+          set -e
+          backend_code=$(printf '%s\n' "${backend_body}" | tail -n 1)
+          backend_payload=$(printf '%s\n' "${backend_body}" | sed '$d')
+          printf '%s\n' "${backend_payload}"
+          if [ "${backend_rc}" -ne 0 ] || [ "${backend_code}" != "200" ]; then
+            echo "Backend verification: FAILED"
+            echo "ERROR: Backend HTTP ${backend_code} curl_rc=${backend_rc}" >&2
+            exit 1
+          fi
+          echo "Backend verification: SUCCESS"
+          echo "============================================================"
+          echo "              DEPLOYMENT VERIFICATION PASSED"
+          echo "============================================================"
         '''
       }
     }
