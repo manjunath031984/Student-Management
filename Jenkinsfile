@@ -685,9 +685,41 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
         sh '''
           set -euo pipefail
           IP=$(cat "${WORKSPACE}/gateway-ip.txt")
-          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors "http://${IP}/" | head -c 200
+          echo "Gateway address=${IP}"
+          # Gateway IP can exist before GFE backends pass health checks (connect failures, then HTTP 503).
+          max=36
+          delay=10
+          for url in "http://${IP}/" "http://${IP}/api/students"; do
+            ready=0
+            i=1
+            while [ "${i}" -le "${max}" ]; do
+              set +e
+              http_code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 20 "${url}")
+              curl_rc=$?
+              set -e
+              if [ "${curl_rc}" -eq 0 ] && [ "${http_code}" = "200" ]; then
+                echo "${url} ready: HTTP ${http_code}"
+                ready=1
+                break
+              fi
+              if [ "${curl_rc}" -ne 0 ]; then
+                echo "${url} not ready (${i}/${max}): connection/timeout curl_rc=${curl_rc}"
+              else
+                echo "${url} not ready (${i}/${max}): HTTP ${http_code}"
+              fi
+              i=$((i + 1))
+              sleep "${delay}"
+            done
+            if [ "${ready}" -ne 1 ]; then
+              echo "ERROR: ${url} did not return HTTP 200 within $((max * delay))s" >&2
+              exit 1
+            fi
+          done
+          echo "GET / (truncated):"
+          curl -sS --max-time 20 "http://${IP}/" | dd bs=1 count=200 2>/dev/null
           echo
-          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors "http://${IP}/api/students"
+          echo "GET /api/students:"
+          curl -sS --fail --max-time 20 "http://${IP}/api/students"
           echo
         '''
       }
