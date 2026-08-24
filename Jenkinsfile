@@ -29,14 +29,9 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') {
+    stage('Checkout Source') {
       steps {
         checkout scm
-      }
-    }
-
-    stage('Validate Parameters') {
-      steps {
         script {
           if (!params.ACTION?.trim()) { error('ACTION is required') }
           if (!(params.ENVIRONMENT in ['dev', 'qa', 'prod'])) { error('ENVIRONMENT must be dev, qa, or prod') }
@@ -48,11 +43,6 @@ pipeline {
           env.TF_BACKEND_FILE = "backend/${params.ENVIRONMENT}.tfbackend"
           echo "ACTION=${params.ACTION} ENVIRONMENT=${params.ENVIRONMENT} IMAGE_TAG=${env.IMAGE_TAG} CLUSTER=${env.CLUSTER_NAME} TF_VAR_FILE=${env.TF_VAR_FILE}"
         }
-      }
-    }
-
-    stage('GCP Authentication') {
-      steps {
         withCredentials([
           file(
             credentialsId: 'gcp-infra-admin',
@@ -68,7 +58,7 @@ pipeline {
       }
     }
 
-    stage('Java Validation') {
+    stage('Build & Test') {
       when { expression { params.ACTION == 'APPLY' } }
       steps {
         sh '''
@@ -81,12 +71,6 @@ pipeline {
             exit 1
           }
         '''
-      }
-    }
-
-    stage('Maven Validation') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
         sh '''
           set -euo pipefail
           MVN_VERSION=$(mvn -version | head -n 1)
@@ -102,29 +86,6 @@ pipeline {
             exit 1
           }
         '''
-      }
-    }
-
-    stage('Docker Validation') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          docker version
-          docker info
-          gcloud version
-          gcloud auth list
-          gcloud config get-value project
-          env | grep -i proxy || true
-          env | grep -i no_proxy || true
-          curl -Iv https://us-central1-docker.pkg.dev/v2/ || true
-        '''
-      }
-    }
-
-    stage('Application Tests') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
         dir('backend') {
           sh '''
             set -euo pipefail
@@ -145,19 +106,80 @@ pipeline {
       }
     }
 
-    stage('Docker Build') {
+    stage('Docker Build & Push') {
       when { expression { params.ACTION == 'APPLY' } }
       steps {
+        sh '''
+          set -euo pipefail
+          docker version
+          docker info
+          gcloud version
+          gcloud auth list
+          gcloud config get-value project
+          env | grep -i proxy || true
+          env | grep -i no_proxy || true
+          curl -Iv https://us-central1-docker.pkg.dev/v2/ || true
+        '''
         sh '''
           set -euo pipefail
           docker build -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" backend
           docker build --build-arg VITE_API_BASE_URL=/api \
             -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" frontend
         '''
+        withCredentials([
+          file(
+            credentialsId: 'gcp-infra-admin',
+            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
+          )
+        ]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            gcloud artifacts repositories describe student-management \
+              --location=us-central1 \
+              --project=gcp-dev-july-2026
+            gcloud auth configure-docker "${AR_HOST}" --quiet
+            if ! docker buildx inspect student-mgmt-ar >/dev/null 2>&1; then
+              docker buildx create --name student-mgmt-ar --driver docker-container \
+                --driver-opt env.GODEBUG=tlsmlkem=0
+            fi
+            docker buildx inspect student-mgmt-ar --bootstrap
+            pwd
+            ls -la
+            find . -maxdepth 2 -name Dockerfile -print
+            test -f backend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
+              exit 1
+            }
+            test -f frontend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
+              exit 1
+            }
+            gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+            docker buildx build \
+              --builder student-mgmt-ar \
+              --push \
+              --provenance=false \
+              --sbom=false \
+              -f backend/Dockerfile \
+              -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
+              backend
+            docker buildx build \
+              --builder student-mgmt-ar \
+              --push \
+              --provenance=false \
+              --sbom=false \
+              --build-arg VITE_API_BASE_URL=/api \
+              -f frontend/Dockerfile \
+              -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" \
+              frontend
+          '''
+        }
       }
     }
 
-    stage('Terraform Format') {
+    stage('Terraform Plan') {
       steps {
         dir('terraform') {
           sh '''
@@ -165,11 +187,6 @@ pipeline {
             terraform fmt -check -recursive
           '''
         }
-      }
-    }
-
-    stage('Terraform State Bucket') {
-      steps {
         withCredentials([
           file(
             credentialsId: 'gcp-infra-admin',
@@ -262,14 +279,7 @@ pipeline {
 
             echo "Terraform state bucket validation completed."
           '''
-        }
-      }
-    }
-
-    stage('Terraform Init') {
-      steps {
-        dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          dir('terraform') {
             sh '''
               set -euo pipefail
               TFV="${TERRAFORM_VERSION}"
@@ -285,55 +295,31 @@ pipeline {
                 exit 1
               }
               terraform init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
-            '''
-          }
-        }
-      }
-    }
-
-    stage('Terraform Validate') {
-      steps {
-        dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-            sh '''
-              set -euo pipefail
               terraform validate
+              if [ "${ACTION}" = "DESTROY" ]; then
+                terraform plan -destroy -input=false -var-file="${TF_VAR_FILE}"
+              else
+                terraform plan -input=false -var-file="${TF_VAR_FILE}"
+              fi
             '''
           }
         }
       }
     }
 
-    stage('Terraform Plan') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-            sh '''
-              set -euo pipefail
-              terraform plan -input=false -var-file="${TF_VAR_FILE}"
-            '''
-          }
-        }
-      }
-    }
-
-    stage('Terraform Apply Approval') {
+    stage('Approve Terraform Apply') {
       when { expression { params.ACTION == 'APPLY' } }
       steps {
         script {
           timeout(time: 30, unit: 'MINUTES') {
             input(
-              message: """Terraform Plan completed successfully.
+              message: """Terraform Apply requires manual approval. This will create/update GCP infrastructure.
 
-GCP Project:
-gcp-dev-july-2026
+Approve Terraform Apply for gcp-dev-july-2026?
 
 Environment:
-${params.ENVIRONMENT}
-
-Do you want to APPLY the Terraform infrastructure?""",
-              ok: 'Apply Infrastructure'
+${params.ENVIRONMENT}""",
+              ok: 'Proceed'
             )
           }
         }
@@ -354,36 +340,226 @@ Do you want to APPLY the Terraform infrastructure?""",
       }
     }
 
-    stage('Terraform Destroy Plan') {
-      when { expression { params.ACTION == 'DESTROY' } }
+    stage('Deploy Application') {
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
-        dir('terraform') {
-          withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-            sh '''
-              set -euo pipefail
-              terraform plan -destroy -input=false -var-file="${TF_VAR_FILE}"
-            '''
-          }
+        withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+              --region="${GCP_REGION}" \
+              --project="${GCP_PROJECT_ID}"
+            kubectl get nodes -o wide
+          '''
         }
+        sh 'kubectl apply -f "${K8S_DIR}/namespace.yaml"'
+        sh '''
+          set -euo pipefail
+          if ! kubectl -n student-management get secret student-management-postgres-secret >/dev/null 2>&1; then
+            POSTGRES_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+            kubectl -n student-management create secret generic student-management-postgres-secret \
+              --from-literal=POSTGRES_DB=student_management \
+              --from-literal=POSTGRES_USER=student_admin \
+              --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+            unset POSTGRES_PASSWORD
+          fi
+          kubectl apply -f "${K8S_DIR}/postgres-pvc.yaml"
+          kubectl apply -f "${K8S_DIR}/postgres-statefulset.yaml"
+          kubectl apply -f "${K8S_DIR}/postgres-service.yaml"
+        '''
+        sh '''
+          set -euo pipefail
+          kubectl -n student-management rollout status statefulset/student-management-postgres --timeout=300s
+          kubectl wait --for=condition=Ready pod/student-management-postgres-0 -n student-management --timeout=300s
+        '''
+        sh '''
+          set -euo pipefail
+          kubectl apply -f "${K8S_DIR}/configmap.yaml"
+          DB_PASSWORD="$(kubectl -n student-management get secret student-management-postgres-secret \
+            -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
+          test -n "${DB_PASSWORD}" || {
+            echo "ERROR: PostgreSQL secret student-management-postgres-secret is missing POSTGRES_PASSWORD" >&2
+            exit 1
+          }
+          kubectl -n student-management create secret generic student-management-backend-secret \
+            --from-literal=DB_PASSWORD="${DB_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          unset DB_PASSWORD
+          sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/backend-deployment.yaml" | kubectl apply -f -
+          kubectl apply -f "${K8S_DIR}/backend-service.yaml"
+          kubectl -n student-management rollout status deployment/backend --timeout=300s
+        '''
+        sh '''
+          set -euo pipefail
+          sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/frontend-deployment.yaml" | kubectl apply -f -
+          kubectl apply -f "${K8S_DIR}/frontend-service.yaml"
+          kubectl -n student-management rollout status deployment/frontend --timeout=300s
+        '''
+        sh '''
+          set -euo pipefail
+          kubectl get gatewayclass gke-l7-regional-external-managed
+          if ! kubectl get gatewayclass gke-l7-regional-external-managed >/dev/null 2>&1; then
+            kubectl apply -f "${K8S_DIR}/gateway-class.yaml"
+          fi
+          kubectl apply -f "${K8S_DIR}/gateway.yaml"
+          kubectl apply -f "${K8S_DIR}/healthcheck-policies.yaml"
+        '''
+        sh 'kubectl apply -f "${K8S_DIR}/http-route.yaml"'
       }
     }
 
-    stage('Terraform Destroy Approval') {
+    stage('Deployment Verification') {
+      when { expression { params.ACTION == 'APPLY' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          kubectl get nodes -o wide
+          NODE_COUNT=$(kubectl get nodes --no-headers | wc -l | tr -d " ")
+          if [ "${NODE_COUNT}" != "2" ]; then
+            echo "Expected exactly 2 worker nodes, found ${NODE_COUNT}" >&2
+            exit 1
+          fi
+        '''
+        sh '''
+          set -euo pipefail
+          kubectl get statefulset -n student-management
+          kubectl get pods -n student-management
+          kubectl get pvc -n student-management
+          kubectl get svc -n student-management
+        '''
+        sh '''
+          set -euo pipefail
+          for svc in frontend-service backend-service student-management-postgres; do
+            TYPE=$(kubectl -n student-management get svc "${svc}" -o jsonpath="{.spec.type}")
+            echo "${svc} type=${TYPE}"
+            if [ "${TYPE}" != "ClusterIP" ]; then
+              echo "${svc} must be ClusterIP" >&2
+              exit 1
+            fi
+          done
+        '''
+        sh '''
+          set -euo pipefail
+          kubectl get gatewayclass
+          kubectl get gateway -n student-management
+          kubectl get httproute -n student-management
+          for i in $(seq 1 60); do
+            IP=$(kubectl -n student-management get gateway student-management-gateway \
+              -o jsonpath="{.status.addresses[0].value}" 2>/dev/null || true)
+            if [ -n "${IP}" ]; then
+              echo "Gateway address=${IP}"
+              echo "${IP}" > "${WORKSPACE}/gateway-ip.txt"
+              break
+            fi
+            echo "Waiting for Gateway address (${i}/60)..."
+            sleep 10
+            if [ "${i}" = "60" ]; then
+              echo "Gateway did not receive an address" >&2
+              kubectl -n student-management describe gateway student-management-gateway
+              exit 1
+            fi
+          done
+        '''
+        sh '''
+          set -euo pipefail
+          IP=$(cat "${WORKSPACE}/gateway-ip.txt")
+          test -n "${IP}" || {
+            echo "ERROR: Gateway IP is empty. Deployment verification cannot continue." >&2
+            exit 1
+          }
+          FRONTEND_URL="http://${IP}/"
+          BACKEND_URL="http://${IP}/api/students"
+
+          echo "=================================================="
+          echo "DEPLOYMENT VERIFICATION"
+          echo "=================================================="
+          echo "Frontend Endpoint:"
+          echo "${FRONTEND_URL}"
+          echo "Backend Endpoint:"
+          echo "${BACKEND_URL}"
+          echo "=================================================="
+
+          max=36
+          delay=10
+          for url in "${FRONTEND_URL}" "${BACKEND_URL}"; do
+            ready=0
+            i=1
+            while [ "${i}" -le "${max}" ]; do
+              set +e
+              http_code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 20 "${url}")
+              curl_rc=$?
+              set -e
+              if [ "${curl_rc}" -eq 0 ] && [ "${http_code}" = "200" ]; then
+                echo "${url} ready: HTTP ${http_code}"
+                ready=1
+                break
+              fi
+              if [ "${curl_rc}" -ne 0 ]; then
+                echo "${url} not ready (${i}/${max}): connection/timeout curl_rc=${curl_rc}"
+              else
+                echo "${url} not ready (${i}/${max}): HTTP ${http_code}"
+              fi
+              i=$((i + 1))
+              sleep "${delay}"
+            done
+            if [ "${ready}" -ne 1 ]; then
+              echo "ERROR: ${url} did not return HTTP 200 within $((max * delay))s" >&2
+              exit 1
+            fi
+          done
+
+          echo "Frontend verification:"
+          set +e
+          frontend_all=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${FRONTEND_URL}")
+          frontend_rc=$?
+          set -e
+          frontend_code=$(printf '%s\n' "${frontend_all}" | tail -n 1)
+          frontend_payload=$(printf '%s\n' "${frontend_all}" | sed '$d')
+          printf '%s\n' "${frontend_payload}" | dd bs=1 count=200 2>/dev/null
+          echo
+          if [ "${frontend_rc}" -ne 0 ] || [ "${frontend_code}" != "200" ]; then
+            echo "Frontend verification: FAILED"
+            echo "ERROR: Frontend HTTP ${frontend_code} curl_rc=${frontend_rc}" >&2
+            exit 1
+          fi
+          echo "Frontend verification: SUCCESS"
+
+          echo "Backend verification:"
+          set +e
+          backend_body=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${BACKEND_URL}")
+          backend_rc=$?
+          set -e
+          backend_code=$(printf '%s\n' "${backend_body}" | tail -n 1)
+          backend_payload=$(printf '%s\n' "${backend_body}" | sed '$d')
+          printf '%s\n' "${backend_payload}"
+          if [ "${backend_rc}" -ne 0 ] || [ "${backend_code}" != "200" ]; then
+            echo "Backend verification: FAILED"
+            echo "ERROR: Backend HTTP ${backend_code} curl_rc=${backend_rc}" >&2
+            exit 1
+          fi
+          echo "Backend verification: SUCCESS"
+          echo "=================================================="
+          echo "DEPLOYMENT VERIFICATION PASSED"
+          echo "=================================================="
+        '''
+      }
+    }
+
+    stage('Approve Terraform Destroy') {
       when { expression { params.ACTION == 'DESTROY' } }
       steps {
         script {
           timeout(time: 30, unit: 'MINUTES') {
             input(
-              message: """WARNING: Terraform DESTROY will permanently remove infrastructure.
+              message: """WARNING: Terraform Destroy will permanently delete the deployed GCP infrastructure. This action is destructive and cannot be automatically reversed.
 
-GCP Project:
-gcp-dev-july-2026
+WARNING: Approve Terraform Destroy for gcp-dev-july-2026? This will permanently delete infrastructure.
 
 Environment:
-${params.ENVIRONMENT}
-
-Are you sure you want to DESTROY the Terraform infrastructure?""",
-              ok: 'DESTROY Infrastructure'
+${params.ENVIRONMENT}""",
+              ok: 'Proceed'
             )
           }
         }
@@ -398,9 +574,6 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
             set -euo pipefail
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project gcp-dev-july-2026
-            # Gateway HTTPRoute backends create GKE-managed zonal NEGs on gke-vpc.
-            # Those NEGs are not Terraform resources. Delete the Kubernetes Gateway
-            # stack first so the NEG controller releases them before VPC destroy.
             cluster_present=0
             if gcloud container clusters describe "${CLUSTER_NAME}" \
                  --region="${GCP_REGION}" \
@@ -453,14 +626,6 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
               terraform destroy -input=false -auto-approve -var-file="${TF_VAR_FILE}"
             '''
           }
-        }
-      }
-    }
-
-    stage('Destroy Verification') {
-      when { expression { params.ACTION == 'DESTROY' } }
-      steps {
-        withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
           sh '''
             set -euo pipefail
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
@@ -472,373 +637,6 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
               --format="table(name,location,status)" || true
           '''
         }
-      }
-    }
-
-    stage('GKE Authentication') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        withCredentials([file(credentialsId: 'gcp-infra-admin', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-          sh '''
-            set -euo pipefail
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project gcp-dev-july-2026
-            gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-              --region="${GCP_REGION}" \
-              --project="${GCP_PROJECT_ID}"
-            kubectl get nodes -o wide
-          '''
-        }
-      }
-    }
-
-    stage('Docker Registry Authentication') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        withCredentials([
-          file(
-            credentialsId: 'gcp-infra-admin',
-            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
-          )
-        ]) {
-          sh '''
-            set -euo pipefail
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project gcp-dev-july-2026
-            gcloud artifacts repositories describe student-management \
-              --location=us-central1 \
-              --project=gcp-dev-july-2026
-            gcloud auth configure-docker "${AR_HOST}" --quiet
-            if ! docker buildx inspect student-mgmt-ar >/dev/null 2>&1; then
-              docker buildx create --name student-mgmt-ar --driver docker-container \
-                --driver-opt env.GODEBUG=tlsmlkem=0
-            fi
-            docker buildx inspect student-mgmt-ar --bootstrap
-          '''
-        }
-      }
-    }
-
-    stage('Docker Push') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        withCredentials([
-          file(
-            credentialsId: 'gcp-infra-admin',
-            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
-          )
-        ]) {
-          sh '''
-            set -euo pipefail
-            pwd
-            ls -la
-            find . -maxdepth 2 -name Dockerfile -print
-            test -f backend/Dockerfile || {
-              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
-              exit 1
-            }
-            test -f frontend/Dockerfile || {
-              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
-              exit 1
-            }
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project gcp-dev-july-2026
-            gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-            docker buildx build \
-              --builder student-mgmt-ar \
-              --push \
-              --provenance=false \
-              --sbom=false \
-              -f backend/Dockerfile \
-              -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
-              backend
-            docker buildx build \
-              --builder student-mgmt-ar \
-              --push \
-              --provenance=false \
-              --sbom=false \
-              --build-arg VITE_API_BASE_URL=/api \
-              -f frontend/Dockerfile \
-              -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" \
-              frontend
-          '''
-        }
-      }
-    }
-
-    stage('Deploy Namespace') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh 'kubectl apply -f "${K8S_DIR}/namespace.yaml"'
-      }
-    }
-
-    stage('Deploy PostgreSQL') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          if ! kubectl -n student-management get secret student-management-postgres-secret >/dev/null 2>&1; then
-            POSTGRES_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
-            kubectl -n student-management create secret generic student-management-postgres-secret \
-              --from-literal=POSTGRES_DB=student_management \
-              --from-literal=POSTGRES_USER=student_admin \
-              --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
-            unset POSTGRES_PASSWORD
-          fi
-          kubectl apply -f "${K8S_DIR}/postgres-pvc.yaml"
-          kubectl apply -f "${K8S_DIR}/postgres-statefulset.yaml"
-          kubectl apply -f "${K8S_DIR}/postgres-service.yaml"
-        '''
-      }
-    }
-
-    stage('Wait for PostgreSQL') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          kubectl -n student-management rollout status statefulset/student-management-postgres --timeout=300s
-          kubectl wait --for=condition=Ready pod/student-management-postgres-0 -n student-management --timeout=300s
-        '''
-      }
-    }
-
-    stage('Deploy Backend') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          kubectl apply -f "${K8S_DIR}/configmap.yaml"
-          DB_PASSWORD="$(kubectl -n student-management get secret student-management-postgres-secret \
-            -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
-          test -n "${DB_PASSWORD}" || {
-            echo "ERROR: PostgreSQL secret student-management-postgres-secret is missing POSTGRES_PASSWORD" >&2
-            exit 1
-          }
-          kubectl -n student-management create secret generic student-management-backend-secret \
-            --from-literal=DB_PASSWORD="${DB_PASSWORD}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-          unset DB_PASSWORD
-          sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/backend-deployment.yaml" | kubectl apply -f -
-          kubectl apply -f "${K8S_DIR}/backend-service.yaml"
-          kubectl -n student-management rollout status deployment/backend --timeout=300s
-        '''
-      }
-    }
-
-    stage('Deploy Frontend') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/frontend-deployment.yaml" | kubectl apply -f -
-          kubectl apply -f "${K8S_DIR}/frontend-service.yaml"
-          kubectl -n student-management rollout status deployment/frontend --timeout=300s
-        '''
-      }
-    }
-
-    stage('Deploy Gateway') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          kubectl get gatewayclass gke-l7-regional-external-managed
-          if ! kubectl get gatewayclass gke-l7-regional-external-managed >/dev/null 2>&1; then
-            kubectl apply -f "${K8S_DIR}/gateway-class.yaml"
-          fi
-          kubectl apply -f "${K8S_DIR}/gateway.yaml"
-          kubectl apply -f "${K8S_DIR}/healthcheck-policies.yaml"
-        '''
-      }
-    }
-
-    stage('Deploy HTTPRoute') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh 'kubectl apply -f "${K8S_DIR}/http-route.yaml"'
-      }
-    }
-
-    stage('Verify Nodes') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          kubectl get nodes -o wide
-          NODE_COUNT=$(kubectl get nodes --no-headers | wc -l | tr -d " ")
-          if [ "${NODE_COUNT}" != "2" ]; then
-            echo "Expected exactly 2 worker nodes, found ${NODE_COUNT}" >&2
-            exit 1
-          fi
-        '''
-      }
-    }
-
-    stage('Verify PostgreSQL') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          kubectl get statefulset -n student-management
-          kubectl get pods -n student-management
-          kubectl get pvc -n student-management
-          kubectl get svc -n student-management
-        '''
-      }
-    }
-
-    stage('Verify Services') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          for svc in frontend-service backend-service student-management-postgres; do
-            TYPE=$(kubectl -n student-management get svc "${svc}" -o jsonpath="{.spec.type}")
-            echo "${svc} type=${TYPE}"
-            if [ "${TYPE}" != "ClusterIP" ]; then
-              echo "${svc} must be ClusterIP" >&2
-              exit 1
-            fi
-          done
-        '''
-      }
-    }
-
-    stage('Verify Gateway') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          kubectl get gatewayclass
-          kubectl get gateway -n student-management
-          kubectl get httproute -n student-management
-          for i in $(seq 1 60); do
-            IP=$(kubectl -n student-management get gateway student-management-gateway \
-              -o jsonpath="{.status.addresses[0].value}" 2>/dev/null || true)
-            if [ -n "${IP}" ]; then
-              echo "Gateway address=${IP}"
-              echo "${IP}" > "${WORKSPACE}/gateway-ip.txt"
-              exit 0
-            fi
-            echo "Waiting for Gateway address (${i}/60)..."
-            sleep 10
-          done
-          echo "Gateway did not receive an address" >&2
-          kubectl -n student-management describe gateway student-management-gateway
-          exit 1
-        '''
-      }
-    }
-
-    stage('Deployment Verification') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          IP=$(cat "${WORKSPACE}/gateway-ip.txt")
-          test -n "${IP}" || {
-            echo "ERROR: Gateway IP is empty. Deployment verification cannot continue." >&2
-            exit 1
-          }
-          FRONTEND_URL="http://${IP}/"
-          BACKEND_URL="http://${IP}/api/students"
-
-          echo "============================================================"
-          echo "              DEPLOYMENT ENDPOINTS"
-          echo "============================================================"
-          echo "Frontend:"
-          echo "${FRONTEND_URL}"
-          echo "Backend API:"
-          echo "${BACKEND_URL}"
-          echo "============================================================"
-          echo "              DEPLOYMENT VERIFICATION"
-          echo "============================================================"
-          echo "Gateway IP:"
-          echo "${IP}"
-
-          # Gateway IP can exist before GFE backends pass health checks (connect failures, then HTTP 503).
-          max=36
-          delay=10
-          for url in "${FRONTEND_URL}" "${BACKEND_URL}"; do
-            ready=0
-            i=1
-            while [ "${i}" -le "${max}" ]; do
-              set +e
-              http_code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 20 "${url}")
-              curl_rc=$?
-              set -e
-              if [ "${curl_rc}" -eq 0 ] && [ "${http_code}" = "200" ]; then
-                echo "${url} ready: HTTP ${http_code}"
-                ready=1
-                break
-              fi
-              if [ "${curl_rc}" -ne 0 ]; then
-                echo "${url} not ready (${i}/${max}): connection/timeout curl_rc=${curl_rc}"
-              else
-                echo "${url} not ready (${i}/${max}): HTTP ${http_code}"
-              fi
-              i=$((i + 1))
-              sleep "${delay}"
-            done
-            if [ "${ready}" -ne 1 ]; then
-              echo "ERROR: ${url} did not return HTTP 200 within $((max * delay))s" >&2
-              exit 1
-            fi
-          done
-
-          echo "------------------------------------------------------------"
-          echo "FRONTEND ENDPOINT"
-          echo "------------------------------------------------------------"
-          echo "${FRONTEND_URL}"
-          echo "============================================================"
-          echo "FRONTEND VERIFICATION"
-          echo "============================================================"
-          echo "Endpoint: ${FRONTEND_URL}"
-          echo "Frontend response:"
-          set +e
-          frontend_all=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${FRONTEND_URL}")
-          frontend_rc=$?
-          set -e
-          frontend_code=$(printf '%s\n' "${frontend_all}" | tail -n 1)
-          frontend_payload=$(printf '%s\n' "${frontend_all}" | sed '$d')
-          printf '%s\n' "${frontend_payload}" | dd bs=1 count=200 2>/dev/null
-          echo
-          if [ "${frontend_rc}" -ne 0 ] || [ "${frontend_code}" != "200" ]; then
-            echo "Frontend verification: FAILED"
-            echo "ERROR: Frontend HTTP ${frontend_code} curl_rc=${frontend_rc}" >&2
-            exit 1
-          fi
-          echo "Frontend verification: SUCCESS"
-          echo "============================================================"
-
-          echo "------------------------------------------------------------"
-          echo "BACKEND API ENDPOINT"
-          echo "------------------------------------------------------------"
-          echo "${BACKEND_URL}"
-          echo "============================================================"
-          echo "BACKEND VERIFICATION"
-          echo "============================================================"
-          echo "Endpoint: ${BACKEND_URL}"
-          echo "Backend response:"
-          set +e
-          backend_body=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${BACKEND_URL}")
-          backend_rc=$?
-          set -e
-          backend_code=$(printf '%s\n' "${backend_body}" | tail -n 1)
-          backend_payload=$(printf '%s\n' "${backend_body}" | sed '$d')
-          printf '%s\n' "${backend_payload}"
-          if [ "${backend_rc}" -ne 0 ] || [ "${backend_code}" != "200" ]; then
-            echo "Backend verification: FAILED"
-            echo "ERROR: Backend HTTP ${backend_code} curl_rc=${backend_rc}" >&2
-            exit 1
-          fi
-          echo "Backend verification: SUCCESS"
-          echo "============================================================"
-          echo "              DEPLOYMENT VERIFICATION PASSED"
-          echo "============================================================"
-        '''
       }
     }
   }
