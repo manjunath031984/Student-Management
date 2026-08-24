@@ -199,12 +199,13 @@ pipeline {
                 1.13.*) ;;
                 *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
               esac
-              TF_LINE=$(terraform version | head -n 1)
+              TF_OUT=$(terraform version)
+              TF_LINE="${TF_OUT%%$'\n'*}"
               echo "Detected Terraform: ${TF_LINE}"
-              echo "${TF_LINE}" | grep -q "Terraform v1.13" || {
-                echo "ERROR: Terraform 1.13.x is required"
+              if [ "${TF_LINE}" != "Terraform v1.13.5" ]; then
+                echo "ERROR: Terraform v1.13.5 is required (detected: ${TF_LINE})" >&2
                 exit 1
-              }
+              fi
               terraform init -input=false -reconfigure -backend-config="${TF_BACKEND_FILE}"
               terraform validate
               if [ "${ACTION}" = "DESTROY" ]; then
