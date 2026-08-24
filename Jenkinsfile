@@ -523,19 +523,20 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
     stage('Deploy PostgreSQL') {
       when { expression { params.ACTION == 'APPLY' } }
       steps {
-        withCredentials([string(credentialsId: 'student-management-postgres-password', variable: 'POSTGRES_PASSWORD')]) {
-          sh '''
-            set -euo pipefail
+        sh '''
+          set -euo pipefail
+          if ! kubectl -n student-management get secret student-management-postgres-secret >/dev/null 2>&1; then
+            POSTGRES_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
             kubectl -n student-management create secret generic student-management-postgres-secret \
               --from-literal=POSTGRES_DB=student_management \
               --from-literal=POSTGRES_USER=student_admin \
-              --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
-              --dry-run=client -o yaml | kubectl apply -f -
-            kubectl apply -f "${K8S_DIR}/postgres-pvc.yaml"
-            kubectl apply -f "${K8S_DIR}/postgres-statefulset.yaml"
-            kubectl apply -f "${K8S_DIR}/postgres-service.yaml"
-          '''
-        }
+              --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+            unset POSTGRES_PASSWORD
+          fi
+          kubectl apply -f "${K8S_DIR}/postgres-pvc.yaml"
+          kubectl apply -f "${K8S_DIR}/postgres-statefulset.yaml"
+          kubectl apply -f "${K8S_DIR}/postgres-service.yaml"
+        '''
       }
     }
 
@@ -553,18 +554,23 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
     stage('Deploy Backend') {
       when { expression { params.ACTION == 'APPLY' } }
       steps {
-        withCredentials([string(credentialsId: 'student-management-postgres-password', variable: 'POSTGRES_PASSWORD')]) {
-          sh '''
-            set -euo pipefail
-            kubectl apply -f "${K8S_DIR}/configmap.yaml"
-            kubectl -n student-management create secret generic student-management-backend-secret \
-              --from-literal=DB_PASSWORD="${POSTGRES_PASSWORD}" \
-              --dry-run=client -o yaml | kubectl apply -f -
-            sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/backend-deployment.yaml" | kubectl apply -f -
-            kubectl apply -f "${K8S_DIR}/backend-service.yaml"
-            kubectl -n student-management rollout status deployment/backend --timeout=300s
-          '''
-        }
+        sh '''
+          set -euo pipefail
+          kubectl apply -f "${K8S_DIR}/configmap.yaml"
+          DB_PASSWORD="$(kubectl -n student-management get secret student-management-postgres-secret \
+            -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
+          test -n "${DB_PASSWORD}" || {
+            echo "ERROR: PostgreSQL secret student-management-postgres-secret is missing POSTGRES_PASSWORD" >&2
+            exit 1
+          }
+          kubectl -n student-management create secret generic student-management-backend-secret \
+            --from-literal=DB_PASSWORD="${DB_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          unset DB_PASSWORD
+          sed "s|:PLACEHOLDER|:${IMAGE_TAG}|g" "${K8S_DIR}/backend-deployment.yaml" | kubectl apply -f -
+          kubectl apply -f "${K8S_DIR}/backend-service.yaml"
+          kubectl -n student-management rollout status deployment/backend --timeout=300s
+        '''
       }
     }
 
@@ -690,6 +696,7 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
 
   post {
     failure {
+      echo 'A previous stage failed. The first ERROR / non-zero shell status above this line is the actual cause.'
       echo 'Pipeline failed. Stop here. Do not continue to later phases, commit, or open a PR from a failed run.'
     }
   }
