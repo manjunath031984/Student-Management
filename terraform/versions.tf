@@ -6,9 +6,9 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 6.0"
     }
-    time = {
-      source  = "hashicorp/time"
-      version = "~> 0.13"
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.36"
     }
   }
 }

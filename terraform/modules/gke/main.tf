@@ -1,11 +1,3 @@
-# Destroy order: node pool → cluster → this wait → (module) VPC.
-# cluster depends_on this resource so destroy_duration runs AFTER the cluster is gone,
-# giving Gateway-managed zonal NEGs time to detach before gke-vpc is deleted.
-resource "time_sleep" "wait_for_gke_managed_negs" {
-  create_duration  = "0s"
-  destroy_duration = "10m"
-}
-
 resource "google_container_cluster" "this" {
   project  = var.project_id
   name     = var.cluster_name
@@ -13,8 +5,6 @@ resource "google_container_cluster" "this" {
 
   network    = var.network
   subnetwork = var.subnetwork
-
-  depends_on = [time_sleep.wait_for_gke_managed_negs]
 
   # Exactly one user-managed node pool. The default pool is removed after creation.
   remove_default_node_pool = true
