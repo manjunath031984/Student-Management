@@ -477,20 +477,37 @@ Are you sure you want to DESTROY the Terraform infrastructure?""",
         ]) {
           sh '''
             set -euo pipefail
+            pwd
+            ls -la
+            find . -maxdepth 2 -name Dockerfile -print
+            test -f backend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
+              exit 1
+            }
+            test -f frontend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
+              exit 1
+            }
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project gcp-dev-july-2026
-            for img in \
-              "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
-              "${AR_REPO}/student-management-frontend:${IMAGE_TAG}"
-            do
-              printf 'FROM %s\n' "${img}" | docker buildx build \
-                --builder student-mgmt-ar \
-                --push \
-                --provenance=false \
-                --sbom=false \
-                -t "${img}" \
-                -
-            done
+            gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+            docker buildx build \
+              --builder student-mgmt-ar \
+              --push \
+              --provenance=false \
+              --sbom=false \
+              -f backend/Dockerfile \
+              -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
+              backend
+            docker buildx build \
+              --builder student-mgmt-ar \
+              --push \
+              --provenance=false \
+              --sbom=false \
+              --build-arg VITE_API_BASE_URL=/api \
+              -f frontend/Dockerfile \
+              -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" \
+              frontend
           '''
         }
       }
