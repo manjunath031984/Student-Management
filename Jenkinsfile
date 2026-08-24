@@ -43,18 +43,6 @@ pipeline {
           env.TF_BACKEND_FILE = "backend/${params.ENVIRONMENT}.tfbackend"
           echo "ACTION=${params.ACTION} ENVIRONMENT=${params.ENVIRONMENT} IMAGE_TAG=${env.IMAGE_TAG} CLUSTER=${env.CLUSTER_NAME} TF_VAR_FILE=${env.TF_VAR_FILE}"
         }
-        withCredentials([
-          file(
-            credentialsId: 'gcp-infra-admin',
-            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
-          )
-        ]) {
-          sh '''
-            set -euo pipefail
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project gcp-dev-july-2026
-          '''
-        }
       }
     }
 
@@ -89,10 +77,7 @@ pipeline {
         dir('backend') {
           sh '''
             set -euo pipefail
-            java -version
-            mvn -version
-            mvn -B clean test
-            mvn -B clean package
+            mvn -B clean test package
           '''
         }
         dir('frontend') {
@@ -112,19 +97,6 @@ pipeline {
         sh '''
           set -euo pipefail
           docker version
-          docker info
-          gcloud version
-          gcloud auth list
-          gcloud config get-value project
-          env | grep -i proxy || true
-          env | grep -i no_proxy || true
-          curl -Iv https://us-central1-docker.pkg.dev/v2/ || true
-        '''
-        sh '''
-          set -euo pipefail
-          docker build -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" backend
-          docker build --build-arg VITE_API_BASE_URL=/api \
-            -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" frontend
         '''
         withCredentials([
           file(
@@ -136,6 +108,14 @@ pipeline {
             set -euo pipefail
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project gcp-dev-july-2026
+            test -f backend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
+              exit 1
+            }
+            test -f frontend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
+              exit 1
+            }
             gcloud artifacts repositories describe student-management \
               --location=us-central1 \
               --project=gcp-dev-july-2026
@@ -145,18 +125,6 @@ pipeline {
                 --driver-opt env.GODEBUG=tlsmlkem=0
             fi
             docker buildx inspect student-mgmt-ar --bootstrap
-            pwd
-            ls -la
-            find . -maxdepth 2 -name Dockerfile -print
-            test -f backend/Dockerfile || {
-              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
-              exit 1
-            }
-            test -f frontend/Dockerfile || {
-              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
-              exit 1
-            }
-            gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
             docker buildx build \
               --builder student-mgmt-ar \
               --push \
@@ -287,7 +255,6 @@ pipeline {
                 1.13.*) ;;
                 *) echo "TERRAFORM_VERSION must be 1.13.x" >&2; exit 1 ;;
               esac
-              terraform version
               TF_LINE=$(terraform version | head -n 1)
               echo "Detected Terraform: ${TF_LINE}"
               echo "${TF_LINE}" | grep -q "Terraform v1.13" || {
@@ -399,7 +366,6 @@ ${params.ENVIRONMENT}""",
         '''
         sh '''
           set -euo pipefail
-          kubectl get gatewayclass gke-l7-regional-external-managed
           if ! kubectl get gatewayclass gke-l7-regional-external-managed >/dev/null 2>&1; then
             kubectl apply -f "${K8S_DIR}/gateway-class.yaml"
           fi
@@ -510,35 +476,14 @@ ${params.ENVIRONMENT}""",
             fi
           done
 
-          echo "Frontend verification:"
-          set +e
-          frontend_all=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${FRONTEND_URL}")
-          frontend_rc=$?
-          set -e
-          frontend_code=$(printf '%s\n' "${frontend_all}" | tail -n 1)
-          frontend_payload=$(printf '%s\n' "${frontend_all}" | sed '$d')
-          printf '%s\n' "${frontend_payload}" | dd bs=1 count=200 2>/dev/null
+          echo "Frontend verification: ${FRONTEND_URL}"
+          curl -fsS --connect-timeout 5 --max-time 20 "${FRONTEND_URL}" | dd bs=1 count=200 2>/dev/null
           echo
-          if [ "${frontend_rc}" -ne 0 ] || [ "${frontend_code}" != "200" ]; then
-            echo "Frontend verification: FAILED"
-            echo "ERROR: Frontend HTTP ${frontend_code} curl_rc=${frontend_rc}" >&2
-            exit 1
-          fi
           echo "Frontend verification: SUCCESS"
 
-          echo "Backend verification:"
-          set +e
-          backend_body=$(curl -sS -w '\n%{http_code}' --connect-timeout 5 --max-time 20 "${BACKEND_URL}")
-          backend_rc=$?
-          set -e
-          backend_code=$(printf '%s\n' "${backend_body}" | tail -n 1)
-          backend_payload=$(printf '%s\n' "${backend_body}" | sed '$d')
-          printf '%s\n' "${backend_payload}"
-          if [ "${backend_rc}" -ne 0 ] || [ "${backend_code}" != "200" ]; then
-            echo "Backend verification: FAILED"
-            echo "ERROR: Backend HTTP ${backend_code} curl_rc=${backend_rc}" >&2
-            exit 1
-          fi
+          echo "Backend verification: ${BACKEND_URL}"
+          curl -fsS --connect-timeout 5 --max-time 20 "${BACKEND_URL}"
+          echo
           echo "Backend verification: SUCCESS"
           echo "=================================================="
           echo "DEPLOYMENT VERIFICATION PASSED"
