@@ -22,7 +22,6 @@ RUN apt-get update \
          jq \
          lsb-release \
          unzip \
-         python3 \
          apt-transport-https \
          openssl \
     && update-ca-certificates \
@@ -69,7 +68,8 @@ RUN curl -fsSL \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
     && ln -sfn /usr/local/lib/docker/cli-plugins/docker-buildx /usr/libexec/docker/cli-plugins/docker-buildx \
     && groupadd -f docker \
-    && usermod -aG docker jenkins
+    && usermod -aG docker jenkins \
+    && usermod -aG root jenkins
 
 # Terraform 1.13.x (image default; pipeline must not install another Java/Maven).
 RUN curl -fsSL \
@@ -116,8 +116,6 @@ RUN printf '%s\n' \
     && test -x /opt/maven/bin/mvn \
     && test -x /usr/local/bin/java \
     && test -x /opt/maven/bin/mvn
-
-COPY init.groovy.d/ /usr/share/jenkins/ref/init.groovy.d/
 
 USER jenkins
 
