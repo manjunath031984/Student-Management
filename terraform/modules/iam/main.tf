@@ -35,6 +35,12 @@ locals {
     "roles/stackdriver.resourceMetadata.writer",
     "roles/artifactregistry.reader",
   ]
+
+  # Human operator identity used for local gcloud/kubectl (not Jenkins).
+  # roles/container.clusterViewer includes container.clusters.get.
+  gke_cluster_viewer_members = [
+    "user:manjunathv290384@gmail.com",
+  ]
 }
 
 resource "google_project_iam_member" "infra_admin" {
@@ -51,6 +57,14 @@ resource "google_project_iam_member" "gke_nodes" {
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.gke_nodes.email}"
+}
+
+resource "google_project_iam_member" "gke_cluster_viewer" {
+  for_each = toset(local.gke_cluster_viewer_members)
+
+  project = var.project_id
+  role    = "roles/container.clusterViewer"
+  member  = each.value
 }
 
 resource "google_service_account_iam_member" "infra_admin_use_nodes" {
