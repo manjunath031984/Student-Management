@@ -91,62 +91,6 @@ pipeline {
       }
     }
 
-    stage('Docker Build & Push') {
-      when { expression { params.ACTION == 'APPLY' } }
-      steps {
-        sh '''
-          set -euo pipefail
-          docker version
-        '''
-        withCredentials([
-          file(
-            credentialsId: 'gcp-infra-admin',
-            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
-          )
-        ]) {
-          sh '''
-            set -euo pipefail
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project gcp-dev-july-2026
-            test -f backend/Dockerfile || {
-              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
-              exit 1
-            }
-            test -f frontend/Dockerfile || {
-              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
-              exit 1
-            }
-            gcloud artifacts repositories describe student-management \
-              --location=us-central1 \
-              --project=gcp-dev-july-2026
-            gcloud auth configure-docker "${AR_HOST}" --quiet
-            if ! docker buildx inspect student-mgmt-ar >/dev/null 2>&1; then
-              docker buildx create --name student-mgmt-ar --driver docker-container \
-                --driver-opt env.GODEBUG=tlsmlkem=0
-            fi
-            docker buildx inspect student-mgmt-ar --bootstrap
-            docker buildx build \
-              --builder student-mgmt-ar \
-              --push \
-              --provenance=false \
-              --sbom=false \
-              -f backend/Dockerfile \
-              -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
-              backend
-            docker buildx build \
-              --builder student-mgmt-ar \
-              --push \
-              --provenance=false \
-              --sbom=false \
-              --build-arg VITE_API_BASE_URL=/api \
-              -f frontend/Dockerfile \
-              -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" \
-              frontend
-          '''
-        }
-      }
-    }
-
     stage('Terraform Plan') {
       steps {
         dir('terraform') {
@@ -303,6 +247,62 @@ ${params.ENVIRONMENT}""",
               terraform apply -input=false -auto-approve -var-file="${TF_VAR_FILE}"
             '''
           }
+        }
+      }
+    }
+
+    stage('Docker Build & Push') {
+      when { expression { params.ACTION == 'APPLY' } }
+      steps {
+        sh '''
+          set -euo pipefail
+          docker version
+        '''
+        withCredentials([
+          file(
+            credentialsId: 'gcp-infra-admin',
+            variable: 'GOOGLE_APPLICATION_CREDENTIALS'
+          )
+        ]) {
+          sh '''
+            set -euo pipefail
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project gcp-dev-july-2026
+            test -f backend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at backend/Dockerfile" >&2
+              exit 1
+            }
+            test -f frontend/Dockerfile || {
+              echo "ERROR: expected existing Dockerfile at frontend/Dockerfile" >&2
+              exit 1
+            }
+            gcloud artifacts repositories describe student-management \
+              --location=us-central1 \
+              --project=gcp-dev-july-2026
+            gcloud auth configure-docker "${AR_HOST}" --quiet
+            if ! docker buildx inspect student-mgmt-ar >/dev/null 2>&1; then
+              docker buildx create --name student-mgmt-ar --driver docker-container \
+                --driver-opt env.GODEBUG=tlsmlkem=0
+            fi
+            docker buildx inspect student-mgmt-ar --bootstrap
+            docker buildx build \
+              --builder student-mgmt-ar \
+              --push \
+              --provenance=false \
+              --sbom=false \
+              -f backend/Dockerfile \
+              -t "${AR_REPO}/student-management-backend:${IMAGE_TAG}" \
+              backend
+            docker buildx build \
+              --builder student-mgmt-ar \
+              --push \
+              --provenance=false \
+              --sbom=false \
+              --build-arg VITE_API_BASE_URL=/api \
+              -f frontend/Dockerfile \
+              -t "${AR_REPO}/student-management-frontend:${IMAGE_TAG}" \
+              frontend
+          '''
         }
       }
     }
