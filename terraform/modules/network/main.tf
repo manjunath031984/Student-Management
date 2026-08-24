@@ -3,6 +3,13 @@ resource "google_compute_network" "vpc" {
   name                    = var.network_name
   auto_create_subnetworks = false
   routing_mode            = "REGIONAL"
+
+  # GKE Gateway (gke-l7-regional-external-managed) creates zonal NEGs that are not
+  # Terraform resources. After the cluster delete API returns, those NEGs can still
+  # hold the VPC for several minutes. Retry network delete until they are gone.
+  timeouts {
+    delete = "45m"
+  }
 }
 
 resource "google_compute_subnetwork" "gke" {
