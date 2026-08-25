@@ -1,14 +1,763 @@
 # Student Management System
 
-## 1. Project title
+Full-stack student CRUD application (Spring Boot, React, PostgreSQL) with **localhost** development and a **Google Cloud / GKE** deployment path.
 
-**Student Management System** — a localhost-only full-stack CRUD web application for learning Spring Boot, React, PostgreSQL, and Docker (without Docker Compose).
+| Item | Value |
+|------|--------|
+| GCP project | `gcp-dev-july-2026` |
+| Region | `us-central1` |
+| Validated GKE cluster | `gke-student-mgmt-dev` |
+| Human operator (local `gcloud` / `kubectl`) | `manjunathv290384@gmail.com` |
+| Infrastructure service account (Terraform / Jenkins) | `infra-admin@gcp-dev-july-2026.iam.gserviceaccount.com` |
+| Current Git branch | `feature/student-management-gke-infrastructure` |
+| GitHub | https://github.com/manjunath031984/Student-Management |
 
-## 2. Project overview
+Local Docker still does **not** use Docker Compose. Terraform manages GCP infrastructure only. Jenkins applies Kubernetes manifests with `kubectl`. Additional Terraform notes live in [`terraform/README.md`](terraform/README.md).
 
-This project manages student records through a React user interface and a Spring Boot REST API backed by PostgreSQL running on Windows.
+## Table of contents
 
-It is designed for local development and learning. Local Docker still does **not** use Docker Compose. GCP/GKE deployment is documented in [`terraform/README.md`](terraform/README.md) and orchestrated by the root `Jenkinsfile`.
+- [Project status](#project-status)
+- [End-to-end architecture](#end-to-end-architecture)
+- [Stage 1 — Repository setup](#stage-1--repository-setup)
+- [Stage 2 — Terraform infrastructure](#stage-2--terraform-infrastructure)
+- [Stage 3 — GCP IAM](#stage-3--gcp-iam)
+- [Stage 4 — GCP networking](#stage-4--gcp-networking)
+- [Stage 5 — Artifact Registry](#stage-5--artifact-registry)
+- [Stage 6 — Application Dockerization](#stage-6--application-dockerization)
+- [Stage 7 — GKE cluster](#stage-7--gke-cluster)
+- [Stage 8 — GKE IAM / cluster access](#stage-8--gke-iam--cluster-access)
+- [Stage 9 — GKE authentication plugin](#stage-9--gke-authentication-plugin)
+- [Stage 10 — Kubernetes validation](#stage-10--kubernetes-validation)
+- [Stage 11 — Kubernetes application deployment](#stage-11--kubernetes-application-deployment)
+- [Stage 12 — Application validation](#stage-12--application-validation)
+- [Stage 13 — Jenkins / CI-CD](#stage-13--jenkins--ci-cd)
+- [Stage 14 — Architecture diagram](#stage-14--architecture-diagram)
+- [Stage 15 — Deployment flow](#stage-15--deployment-flow)
+- [Stage 16 — Command reference](#stage-16--command-reference)
+- [Stage 17 — Troubleshooting](#stage-17--troubleshooting)
+- [Completed vs future work](#completed-vs-future-work)
+- [Local Windows development](#3-features) (original localhost guide, below)
+
+---
+
+## Project status
+
+Statuses below are from this repository plus **observed** `kubectl` output on `gke-student-mgmt-dev`. QA/PROD Terraform files exist; they were **not** the validated live cluster.
+
+| Stage | Status | Details |
+|-------|--------|---------|
+| Git repository | Completed | GitHub remote; work on `feature/student-management-gke-infrastructure` |
+| Terraform (GCP infra) | Completed | Modules under `terraform/`; GCS backend; Jenkins apply |
+| IAM | Completed | `infra-admin` project roles + human `roles/container.clusterViewer` |
+| Networking | Completed | VPC, GKE subnet, secondary ranges, proxy-only subnet, firewall (no Cloud NAT/router in this repo) |
+| Artifact Registry | Completed | Docker repo `student-management` in `us-central1` |
+| Docker images | Completed | `backend/Dockerfile`, `frontend/Dockerfile`; Jenkins `buildx` push |
+| GKE | Completed / validated | Regional Standard cluster `gke-student-mgmt-dev` |
+| Kubernetes workloads | Completed / validated | Namespace `student-management`; frontend, backend, PostgreSQL `1/1 Running` |
+| Jenkins pipeline | Completed in repo | Root `Jenkinsfile` + `jenkins/Dockerfile` |
+| Local Windows app | Completed | Spring Boot + React + PostgreSQL 18; Docker without Compose |
+| HTTPS / TLS on Gateway | Planned | HTTP listener port 80 only |
+| Dedicated GKE node SA | Not current | Workers use `infra-admin` (see IAM module) |
+| Cloud NAT / Cloud Router | Not implemented | Not present in `terraform/modules/network` |
+
+---
+
+## End-to-end architecture
+
+```text
+Git Repository
+      |
+      v
+Jenkins (Jenkinsfile)
+      |
+      +-- terraform apply --> GCP IAM, VPC, GKE, Artifact Registry
+      |
+      +-- docker buildx --push --> Artifact Registry
+      |
+      +-- kubectl apply --> student-management namespace
+                              |
+                 +------------+------------+
+                 |            |            |
+                 v            v            v
+              Frontend     Backend     PostgreSQL
+              Deployment   Deployment  StatefulSet
+```
+
+Local operator access (not Jenkins):
+
+```text
+manjunathv290384@gmail.com
+        |
+        +-- roles/container.clusterViewer
+        |
+        +-- gcloud / kubectl on the workstation
+```
+
+---
+
+## Stage 1 — Repository setup
+
+### Git
+
+- Remote: `https://github.com/manjunath031984/Student-Management`
+- Default branch: `main`
+- Application feature branch (localhost work): `feature/Student-Management`
+- Infrastructure / GKE feature branch (current): `feature/student-management-gke-infrastructure`
+
+Do not push application or infrastructure work directly to `main` unless explicitly requested.
+
+### Layout (actual)
+
+```text
+Student-Management/
+├── backend/                 # Spring Boot 3.2.x, Java 17, port 8080
+├── frontend/                # React/Vite, Nginx port 80
+├── terraform/               # GCP infrastructure (no Kubernetes provider)
+│   ├── main.tf              # Module wiring
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── providers.tf
+│   ├── versions.tf
+│   ├── backend.tf           # GCS backend (empty config; file per env)
+│   ├── locals.tf
+│   ├── backend/             # gke/dev, gke/qa, gke/prod prefixes
+│   ├── environments/        # dev.tfvars, qa.tfvars, prod.tfvars
+│   ├── bootstrap/           # State bucket (once)
+│   ├── kubernetes/          # Manifests applied by Jenkins/kubectl
+│   └── modules/
+│       ├── project-services/
+│       ├── iam/
+│       ├── network/
+│       ├── firewall/
+│       ├── artifact-registry/
+│       └── gke/
+├── jenkins/Dockerfile       # Custom Jenkins image (Java 17, Maven 3.5.4, Terraform, gcloud, kubectl)
+├── Jenkinsfile              # Pipeline
+├── setup.ps1                # Local tool checks (does not install software)
+└── README.md
+```
+
+| Path | Purpose |
+|------|---------|
+| `backend/` | REST API (`/api/students`) |
+| `frontend/` | React UI |
+| `terraform/modules/*` | GCP resources |
+| `terraform/kubernetes/` | Namespace, Deployments, StatefulSet, Services, Gateway API |
+| `Jenkinsfile` | Plan/apply, image push, `kubectl` deploy, destroy |
+
+---
+
+## Stage 2 — Terraform infrastructure
+
+Terraform **does not** apply application manifests. There is no Kubernetes provider. Workloads are deployed by Jenkins with `kubectl`.
+
+### Versions and provider
+
+- Terraform: `>= 1.13.0, < 2.0.0` (`terraform/versions.tf`); Jenkins default `1.13.5`
+- Provider: `hashicorp/google` `~> 6.0`
+- Provider project/region: `var.project_id` / `var.region` (`terraform/providers.tf`)
+
+### Remote state
+
+Implemented. `terraform/backend.tf` uses `backend "gcs" {}`. Per-environment files:
+
+| Environment | Bucket | Prefix | Cluster name in tfvars |
+|-------------|--------|--------|------------------------|
+| DEV | `gcp-dev-july-2026-terraform-state` | `gke/dev` | `gke-student-mgmt-dev` |
+| QA | same bucket | `gke/qa` | `gke-student-mgmt-qa` |
+| PROD | same bucket | `gke/prod` | `gke-student-mgmt-prod` |
+
+Bucket creation: `terraform/bootstrap` (uniform access, public access prevention enforced, versioning). Jenkins can also create the bucket before `terraform init` if it is missing.
+
+### Modules and dependency order
+
+From `terraform/main.tf`:
+
+1. `project-services` — enable APIs (`disable_on_destroy = false`)
+2. `iam` — depends on project-services
+3. `network` — depends on project-services
+4. `firewall` — depends on network
+5. `artifact-registry` — depends on project-services and iam
+6. `gke` — depends on project-services, network, iam, firewall
+
+APIs enabled: `container`, `compute`, `iam`, `iamcredentials`, `cloudresourcemanager`, `artifactregistry`, `logging`, `monitoring`.
+
+### Commands (this project)
+
+From `terraform/` with the matching backend file and tfvars (example: **dev**):
+
+```bash
+cd terraform
+terraform fmt -recursive          # Format HCL
+terraform init -reconfigure -backend-config=backend/dev.tfbackend
+terraform validate                # Syntax and module graph
+terraform plan -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars
+```
+
+`terraform destroy` is **destructive**. Jenkins exposes `ACTION=DESTROY` with a manual approval. It does not destroy the bootstrap GCS bucket.
+
+Selected outputs (`terraform/outputs.tf`): `project_id`, network/subnet CIDRs, cluster name/region/zones, node pool, Artifact Registry id/location. Cluster endpoint and CA cert are sensitive module outputs.
+
+---
+
+## Stage 3 — GCP IAM
+
+Identities are **not** interchangeable.
+
+```text
+Human User (manjunathv290384@gmail.com)
+    |
+    +-- roles/container.clusterViewer
+    |
+    +-- Local gcloud / kubectl
+
+
+infra-admin (infra-admin@gcp-dev-july-2026.iam.gserviceaccount.com)
+    |
+    +-- Terraform / Jenkins
+    |
+    +-- Infrastructure administration (and GKE node identity)
+```
+
+### Human operator
+
+Terraform resource: `google_project_iam_member.gke_cluster_viewer` in `terraform/modules/iam/main.tf`.
+
+- Principal: `user:manjunathv290384@gmail.com`
+- Role: `roles/container.clusterViewer` (includes `container.clusters.get`)
+- Purpose: local `gcloud container clusters describe` / `get-credentials`
+
+The human user does **not** receive `roles/container.admin`. Cluster administration and Jenkins apply use `infra-admin`. Cluster Viewer is enough to **read** cluster metadata and obtain kubeconfig; it is not cluster-admin on GCP.
+
+If the allow policy lists Cluster Viewer but APIs still return 403, accept the Cloud Console project invitation as that Gmail account and refresh `gcloud auth login`. Do not switch local `gcloud` to the service account.
+
+### Infrastructure service account
+
+Existing account (data source, not created by this module): `infra-admin@gcp-dev-july-2026.iam.gserviceaccount.com`.
+
+Roles actually granted in `terraform/modules/iam/main.tf` (Owner/Editor are **not** granted):
+
+| Role |
+|------|
+| `roles/container.admin` |
+| `roles/compute.networkAdmin` |
+| `roles/compute.securityAdmin` |
+| `roles/artifactregistry.admin` |
+| `roles/iam.serviceAccountUser` |
+| `roles/iam.serviceAccountAdmin` |
+| `roles/serviceusage.serviceUsageAdmin` |
+| `roles/logging.configWriter` |
+| `roles/logging.logWriter` |
+| `roles/monitoring.editor` |
+| `roles/stackdriver.resourceMetadata.writer` |
+| `roles/storage.objectAdmin` |
+| `roles/storage.admin` |
+
+GKE nodes use this same account (`node_service_account_email = module.iam.infra_admin_email` in `terraform/main.tf`). `roles/container.defaultNodeServiceAccount` is **not** in the Terraform IAM list.
+
+`infra-admin` is also granted `roles/artifactregistry.reader` on the Docker repository (`terraform/main.tf` `reader_members`).
+
+IAM resources are additive `google_project_iam_member` only. This repo does not use `google_project_iam_policy` or `google_project_iam_binding`.
+
+---
+
+## Stage 4 — GCP networking
+
+Module: `terraform/modules/network` and `terraform/modules/firewall`. Values below are from `terraform/environments/dev.tfvars` (validated environment).
+
+| Component | What | Why | Module |
+|-----------|------|-----|--------|
+| VPC `gke-vpc` | Custom VPC, `auto_create_subnetworks = false`, regional routing | Isolate GKE | `network` |
+| Subnet `gke-subnet` | `192.168.0.0/24`, `us-central1`, **Private Google Access** on | Nodes, VPC-native GKE | `network` |
+| Secondary range `gke-pods` | `192.168.16.0/20` | Pod IPs | `network` |
+| Secondary range `gke-services` | `192.168.32.0/20` | Service IPs | `network` |
+| Proxy-only subnet `gke-proxy-only` | `192.168.48.0/23`, purpose `REGIONAL_MANAGED_PROXY` | GKE Gateway regional external Application Load Balancer | `network` |
+| Firewall `gke-student-mgmt-allow-ssh` | TCP/22, source `ssh_source_ranges` (dev: `0.0.0.0/0`), tag `gke-student-mgmt-ssh` | Direct SSH; IAP is not configured | `firewall` |
+| Firewall `gke-student-mgmt-allow-health-checks` | TCP 80 and 8080 from `130.211.0.0/22` and `35.191.0.0/16`, tag `gke-student-mgmt-web` | GCP/GKE health checks | `firewall` |
+
+**Not in this repository:** Cloud NAT, Cloud Router, custom routes beyond VPC defaults, a public PostgreSQL firewall rule (5432 stays ClusterIP).
+
+GKE networking mode: `VPC_NATIVE` with those secondary ranges (`terraform/modules/gke/main.tf`). Nodes are **not** private-node (no `private_cluster_config` block). Workers receive public IPs and both SSH and web tags.
+
+---
+
+## Stage 5 — Artifact Registry
+
+Module: `terraform/modules/artifact-registry`.
+
+| Setting | Value |
+|---------|--------|
+| Project | `gcp-dev-july-2026` |
+| Location | `us-central1` |
+| Repository ID | `student-management` |
+| Format | `DOCKER` |
+
+Images (Jenkins never uses `latest`; tag is `IMAGE_TAG` or `BUILD_NUMBER`):
+
+```text
+us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management/student-management-backend:${IMAGE_TAG}
+us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management/student-management-frontend:${IMAGE_TAG}
+```
+
+Pipeline (from `Jenkinsfile`):
+
+```bash
+gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+docker buildx build --push -f backend/Dockerfile \
+  -t us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management/student-management-backend:${IMAGE_TAG} \
+  backend
+docker buildx build --push --build-arg VITE_API_BASE_URL=/api -f frontend/Dockerfile \
+  -t us-central1-docker.pkg.dev/gcp-dev-july-2026/student-management/student-management-frontend:${IMAGE_TAG} \
+  frontend
+```
+
+GKE pulls those images. Node identity is `infra-admin`, which has Artifact Registry admin at project level plus repository **reader** on this repo.
+
+---
+
+## Stage 6 — Application Dockerization
+
+```text
+Application source
+       |
+       v
+Dockerfile (multi-stage)
+       |
+       v
+Image tagged for Artifact Registry
+       |
+       v
+GKE Deployments (imagePullPolicy IfNotPresent)
+```
+
+### Backend (`backend/Dockerfile`)
+
+- Build: `eclipse-temurin:17-jdk-jammy`, Maven **3.5.4**, `mvn -B clean package -DskipTests`
+- Runtime: `eclipse-temurin:17-jre-jammy`, JAR `student-management-1.0.0.jar`
+- Port: `8080`
+- GKE env: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME` from ConfigMap; `DB_PASSWORD` from Secret
+
+### Frontend (`frontend/Dockerfile`)
+
+- Build: `node:22-alpine`, `npm ci`, `npm run build`
+- Build-arg/env: `VITE_API_BASE_URL=/api` (GKE same-origin `/api` via HTTPRoute)
+- Runtime: `nginx:1.27-alpine`, port `80`
+- Local `npm run dev` still defaults Axios to `http://localhost:8080/api` when the env is unset (`frontend/src/services/studentService.js`)
+
+This project has **no** `docker-compose.yml`. Local Docker runs are independent containers; GKE does not use Compose.
+
+---
+
+## Stage 7 — GKE cluster
+
+Validated cluster (dev tfvars + live `kubectl`):
+
+| Setting | Implemented value |
+|---------|-------------------|
+| Name | `gke-student-mgmt-dev` |
+| Project | `gcp-dev-july-2026` |
+| Location | Regional `us-central1` |
+| Type | Standard (not Autopilot) |
+| Node locations | `us-central1-a`, `us-central1-b` |
+| Node pool | `gke-student-mgmt-dev-workers` (default pool removed) |
+| Total nodes | `node_count = 2` → **1 per zone** |
+| Autoscaling | Not configured (fixed `node_count`) |
+| Machine type (dev) | `e2-standard-2` |
+| Disk | `50` GB `pd-balanced` |
+| Image type | `UBUNTU_CONTAINERD` |
+| Release channel (dev) | `REGULAR` |
+| Networking | `VPC_NATIVE` |
+| Workload Identity | Enabled (`workload_pool = gcp-dev-july-2026.svc.id.goog`, `GKE_METADATA`) |
+| Private cluster | Not configured |
+| HTTP load balancing addon | Enabled |
+| Horizontal pod autoscaling addon | **Disabled** |
+| Network policy addon | **Disabled** |
+| Gateway API | `CHANNEL_STANDARD` |
+| Logging | `SYSTEM_COMPONENTS`, `WORKLOADS` |
+| Monitoring | `SYSTEM_COMPONENTS` |
+| Shielded nodes | Secure boot + integrity monitoring |
+| Legacy metadata | Disabled |
+| Deletion protection (dev) | `false` |
+| Observed Kubernetes version | `v1.35.6-gke.1641000` (from `kubectl get nodes`; not pinned in Terraform) |
+
+PROD tfvars differ (for example `e2-standard-4`, `100` GB disk, `STABLE` channel, `deletion_protection = true`, cluster name `gke-student-mgmt-prod`). Those files are in the repo; they are not the validated live cluster in Stage 10.
+
+---
+
+## Stage 8 — GKE IAM / cluster access
+
+Use the **human user**, not `infra-admin`:
+
+```bash
+gcloud auth login manjunathv290384@gmail.com
+gcloud config set project gcp-dev-july-2026
+```
+
+Confirm identity, then **GCP IAM** (`container.clusters.get`) before kubeconfig:
+
+```bash
+gcloud auth list
+gcloud config get-value account
+gcloud config get-value project
+
+gcloud container clusters describe gke-student-mgmt-dev \
+  --region us-central1 \
+  --project gcp-dev-july-2026
+```
+
+Then GKE authentication into kubeconfig:
+
+```bash
+gcloud container clusters get-credentials gke-student-mgmt-dev \
+  --region us-central1 \
+  --project gcp-dev-july-2026
+```
+
+`roles/container.clusterViewer` is the intended GCP role for this operator. Do not activate the Jenkins service account for this workstation flow.
+
+---
+
+## Stage 9 — GKE authentication plugin
+
+`kubectl` against GKE requires **gke-gcloud-auth-plugin**. If it is missing, the client reports that the plugin was not found or is not executable.
+
+On the operator workstation (Google Cloud SDK):
+
+```bash
+gcloud components install gke-gcloud-auth-plugin
+gke-gcloud-auth-plugin --version
+```
+
+Current Cloud SDK enables the plugin for GKE once it is installed. The Jenkins image already installs `google-cloud-cli-gke-gcloud-auth-plugin` (`jenkins/Dockerfile`).
+
+---
+
+## Stage 10 — Kubernetes validation
+
+Observed on the validated cluster (do not alter these names or lines).
+
+### Nodes
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                                                  STATUS   ROLES    AGE   VERSION
+gke-gke-student-mgmt-gke-student-mgmt-aec0808f-gdnz   Ready    <none>   16h   v1.35.6-gke.1641000
+gke-gke-student-mgmt-gke-student-mgmt-fd891442-kttj   Ready    <none>   16h   v1.35.6-gke.1641000
+```
+
+Both workers were **Ready**.
+
+### Default namespace
+
+```bash
+kubectl get pods
+```
+
+```text
+No resources found in default namespace.
+```
+
+Application pods are not in `default`.
+
+### Namespaces
+
+```bash
+kubectl get ns
+```
+
+```text
+default
+gke-managed-networking-dra-driver
+gke-managed-system
+gke-managed-volumepopulator
+gmp-public
+gmp-system
+kube-node-lease
+kube-public
+kube-system
+student-management
+```
+
+### Namespace `student-management`
+
+```bash
+kubectl get pods -n student-management
+```
+
+```text
+NAME                            READY   STATUS    RESTARTS   AGE
+backend-bd777c64f-jth4z         1/1     Running   0          16h
+frontend-564dcf95f7-j8z8c       1/1     Running   0          16h
+student-management-postgres-0   1/1     Running   0          16h
+```
+
+Backend, frontend, and PostgreSQL were all **1/1 Running**.
+
+---
+
+## Stage 11 — Kubernetes application deployment
+
+Manifests: `terraform/kubernetes/`. Jenkins applies them after image push (placeholder tags replaced with `${IMAGE_TAG}`).
+
+```text
+                    GKE Cluster (gke-student-mgmt-dev)
+                         |
+                         v
+              student-management namespace
+                         |
+          +--------------+--------------+
+          |              |              |
+          v              v              v
+      Frontend        Backend       PostgreSQL
+      Deployment      Deployment    StatefulSet
+      replicas: 1     replicas: 1   replicas: 1
+          |              |              |
+          v              v              v
+      Service :80     Service :8080  Service :5432
+      ClusterIP       ClusterIP      ClusterIP
+                         |
+                         +-- JDBC --> postgres:5432
+Internet --> Gateway (gke-l7-regional-external-managed)
+                         |
+              HTTPRoute /api --> backend-service:8080
+              HTTPRoute /    --> frontend-service:80
+```
+
+| Resource | Name | Notes |
+|----------|------|--------|
+| Namespace | `student-management` | |
+| Deployment | `frontend` | Container port 80; HTTP probes `/`; image Artifact Registry frontend |
+| Deployment | `backend` | Container port 8080; TCP probes; DB env from ConfigMap + Secret |
+| StatefulSet | `student-management-postgres` | Image `postgres:18`; `pg_isready`; PVC mount |
+| PVC | `student-management-postgres-pvc` | `10Gi`, `ReadWriteOnce`, `standard-rwo` |
+| ConfigMap | `student-management-config` | `DB_HOST=student-management-postgres`, port `5432`, DB `student_management`, user `student_admin` |
+| Secret | `student-management-postgres-secret` | DB name/user/password; Jenkins creates if missing (password not committed) |
+| Secret | `student-management-backend-secret` | `DB_PASSWORD` copied from Postgres secret |
+| Services | `frontend-service`, `backend-service`, `student-management-postgres` | All ClusterIP |
+| Gateway | `student-management-gateway` | HTTP 80 |
+| HTTPRoute | `student-management-route` | `/api` and `/` |
+| HealthCheckPolicy | `frontend-healthcheck`, `backend-healthcheck` | HTTP `/` on 80; TCP 8080 |
+
+GatewayClass `gke-l7-regional-external-managed` is GKE-managed; Jenkins applies the local YAML only if the class is absent.
+
+---
+
+## Stage 12 — Application validation
+
+| Command | What it checks |
+|---------|----------------|
+| `kubectl get nodes` | Workers Ready (GCP + kubelet) |
+| `kubectl get pods` | Default namespace (expected empty for this app) |
+| `kubectl get ns` | `student-management` exists |
+| `kubectl get pods -n student-management` | Frontend, backend, Postgres Running |
+
+Jenkins **Deployment Verification** also checks exactly two nodes, ClusterIP services, Gateway address, and HTTP 200 on `http://<GATEWAY-IP>/` and `http://<GATEWAY-IP>/api/students`.
+
+```bash
+kubectl get nodes
+kubectl get pods
+kubectl get ns
+kubectl get pods -n student-management
+kubectl get gateway,httproute,svc -n student-management
+```
+
+---
+
+## Stage 13 — Jenkins / CI-CD
+
+Implemented in the repository (not a placeholder).
+
+| Item | Actual |
+|------|--------|
+| Pipeline | Root `Jenkinsfile` |
+| Controller image | `jenkins/Dockerfile` (`jenkins/jenkins:lts-jdk17`, Maven 3.5.4, Terraform 1.13.5, Docker CLI, gcloud + GKE auth plugin, kubectl, Node 22) |
+| GCP credential | Jenkins **secret file** ID `gcp-infra-admin` → `GOOGLE_APPLICATION_CREDENTIALS` (JSON is not in git) |
+| Parameters | `ACTION` = `APPLY` or `DESTROY`; `ENVIRONMENT` = `dev` / `qa` / `prod`; `IMAGE_TAG`; `TERRAFORM_VERSION`; `GCP_PROJECT_ID`; `GCP_REGION` |
+
+### APPLY stages (order)
+
+1. **Checkout Source** — cluster name `gke-student-mgmt-${ENVIRONMENT}`
+2. **Build & Test** — `mvn` test/package; frontend `npm ci`, lint, build
+3. **Terraform Plan** — state bucket ensure; `terraform init/validate/plan`
+4. **Approve Terraform Apply** — manual `input`
+5. **Terraform Apply**
+6. **Docker Build & Push** — Artifact Registry
+7. **Deploy Application** — `get-credentials` as `infra-admin`; `kubectl apply` manifests
+8. **Deployment Verification**
+
+### DESTROY stages
+
+9. **Approve Terraform Destroy**
+10. **Terraform Destroy** — Gateway/HTTPRoute cleanup then `terraform apply -destroy`
+
+PostgreSQL password: if the secret does not exist, Jenkins generates one with `/dev/urandom` and does not commit it.
+
+---
+
+## Stage 14 — Architecture diagram
+
+```mermaid
+flowchart TD
+  Developer["Developer / Git"] --> Jenkins
+  Jenkins --> Terraform
+  Terraform --> IAM["GCP IAM"]
+  Terraform --> VPC["VPC gke-vpc"]
+  Terraform --> GKE["GKE gke-student-mgmt-dev"]
+  Terraform --> AR["Artifact Registry"]
+  Jenkins --> AR
+  AR --> GKE
+  Jenkins -->|kubectl| NS["Namespace student-management"]
+  NS --> FE["Frontend Deployment"]
+  NS --> BE["Backend Deployment"]
+  NS --> PG["PostgreSQL StatefulSet"]
+  BE --> PG
+  GW["GKE Gateway HTTP"] --> FE
+  GW --> BE
+  Operator["manjunathv290384@gmail.com"] -->|clusterViewer| GKE
+```
+
+---
+
+## Stage 15 — Deployment flow
+
+```text
+Git Repository
+      |
+      v
+Terraform (Jenkins APPLY)
+      |
+      +--------------------+
+      |                    |
+      v                    v
+GCP IAM                GCP Network
+                           |
+                           v
+                    Artifact Registry
+                           |
+                           v
+                         GKE
+                           |
+                           v
+                    Kubernetes
+                           |
+              +------------+------------+
+              |            |            |
+              v            v            v
+           Frontend     Backend     PostgreSQL
+```
+
+---
+
+## Stage 16 — Command reference
+
+### Terraform (dev)
+
+```bash
+cd terraform
+terraform init -reconfigure -backend-config=backend/dev.tfbackend
+terraform fmt -recursive
+terraform validate
+terraform plan -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars
+# Destructive:
+# terraform plan -destroy -var-file=environments/dev.tfvars
+# terraform apply -destroy -var-file=environments/dev.tfvars
+```
+
+### GCP authentication (human user)
+
+```bash
+gcloud auth login manjunathv290384@gmail.com
+gcloud auth list
+gcloud config get-value account
+gcloud config get-value project
+gcloud config set project gcp-dev-july-2026
+```
+
+### GKE
+
+```bash
+gcloud container clusters describe gke-student-mgmt-dev \
+  --region us-central1 \
+  --project gcp-dev-july-2026
+
+gcloud container clusters get-credentials gke-student-mgmt-dev \
+  --region us-central1 \
+  --project gcp-dev-july-2026
+```
+
+### Kubernetes
+
+```bash
+kubectl config current-context
+kubectl get nodes
+kubectl get pods
+kubectl get ns
+kubectl get pods -n student-management
+```
+
+---
+
+## Stage 17 — Troubleshooting
+
+### Issue 1 — `container.clusters.get` 403
+
+```text
+Required "container.clusters.get" permission(s)
+```
+
+Authenticated as `manjunathv290384@gmail.com`. Required GCP role: `roles/container.clusterViewer` (Terraform `gke_cluster_viewer`). Confirm the binding as an **administrator** (`gcloud projects get-iam-policy`); the Gmail user typically cannot `getIamPolicy` with only Cluster Viewer. Do **not** switch local `gcloud` to `infra-admin`. If the binding exists but APIs still 403, accept the Cloud Console invite for that Gmail account and run `gcloud auth login` again. Independent test: `gcloud container clusters describe` (still GCP IAM, not Kubernetes RBAC).
+
+### Issue 2 — `gke-gcloud-auth-plugin`
+
+```text
+gke-gcloud-auth-plugin ... was not found or is not executable
+```
+
+Install the plugin with `gcloud components install gke-gcloud-auth-plugin` and confirm `gke-gcloud-auth-plugin --version`. This is a **local client** requirement after kubeconfig exists.
+
+### Issue 3 — `kubectl get pods` empty
+
+```text
+No resources found in default namespace.
+```
+
+Expected. Workloads are in `student-management`:
+
+```bash
+kubectl get pods -n student-management
+```
+
+---
+
+## Completed vs future work
+
+### Completed
+
+- Local Spring Boot + React + PostgreSQL 18 CRUD (no Docker Compose)
+- Terraform modules: APIs, IAM, VPC/subnets/firewall, Artifact Registry, regional GKE
+- GCS Terraform state backend and bootstrap bucket
+- Jenkins pipeline: tests, Terraform, image push, kubectl deploy, Gateway verification
+- Live validation: two Ready nodes; frontend, backend, Postgres Running in `student-management`
+- Human operator Cluster Viewer binding in Terraform
+
+### Future enhancements
+
+- TLS/HTTPS on the Gateway (HTTP 80 only today)
+- Dedicated least-privilege GKE node service account (workers currently use `infra-admin`)
+- Cloud NAT / private nodes (not in the network module)
+- QA/PROD live validation (tfvars exist; Stage 10 is **dev** only)
+- Application features still listed under local future work (search, pagination, Swagger, and so on)
+
+---
+
+# Local Windows development
+
+The sections below are the original localhost learning guide (Java 17, Maven 3.5.4, PostgreSQL 18 on Windows, Docker without Compose). They remain valid for local development. GCP/GKE details are in the stages above.
 
 ## 3. Features
 
@@ -218,20 +967,23 @@ This single configuration works for both:
 ## 11. Project structure
 
 ```text
-student-app/
+Student-Management/
 ├── backend/
 │   ├── src/
 │   ├── pom.xml
 │   ├── Dockerfile
 │   └── .dockerignore
-│
 ├── frontend/
 │   ├── src/
 │   ├── package.json
 │   ├── Dockerfile
 │   ├── nginx.conf
 │   └── .dockerignore
-│
+├── terraform/
+├── jenkins/
+│   └── Dockerfile
+├── Jenkinsfile
+├── setup.ps1
 ├── .gitignore
 └── README.md
 ```
@@ -260,7 +1012,7 @@ com.example.studentmanagement
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
 $env:PATH = "$env:JAVA_HOME\bin;D:\apache-maven-3.5.4\bin;" + $env:PATH
 
-cd D:\student-app\backend
+cd D:\Student-Management\backend
 mvn clean package
 mvn spring-boot:run
 ```
@@ -276,7 +1028,7 @@ API base:
 ## 13. Frontend setup
 
 ```powershell
-cd D:\student-app\frontend
+cd D:\Student-Management\frontend
 npm install
 npm run dev
 ```
@@ -415,14 +1167,14 @@ Ensure PostgreSQL 18 is running and `studentdb` exists.
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
 $env:PATH = "$env:JAVA_HOME\bin;D:\apache-maven-3.5.4\bin;" + $env:PATH
-cd D:\student-app\backend
+cd D:\Student-Management\backend
 mvn spring-boot:run
 ```
 
 ### Terminal 3 — Frontend
 
 ```powershell
-cd D:\student-app\frontend
+cd D:\Student-Management\frontend
 npm run dev
 ```
 
@@ -482,10 +1234,10 @@ Benefits:
 ## 23. Docker build commands
 
 ```powershell
-cd D:\student-app\backend
+cd D:\Student-Management\backend
 docker build -t student-management-backend:1.0 .
 
-cd D:\student-app\frontend
+cd D:\Student-Management\frontend
 docker build -t student-management-frontend:1.0 .
 
 docker images
@@ -607,47 +1359,50 @@ Without this, the container tries its own loopback interface and connection is r
 ```text
 main
   |
-  └── feature/Student-Management
-          |
-          └── all development work
+  ├── feature/Student-Management
+  |         └── localhost application development
+  |
+  └── feature/student-management-gke-infrastructure
+            └── GCP / GKE / Jenkins (current)
 ```
 
 Rules:
 
 - Default branch: `main`
-- All application development happens on `feature/Student-Management`
-- Do **not** push application development directly to `main`
-- Do **not** merge feature → main unless explicitly requested
+- Local application work historically lives on `feature/Student-Management`
+- Current infrastructure work lives on `feature/student-management-gke-infrastructure`
+- Do **not** push directly to `main` unless explicitly requested
+- Do **not** merge a feature branch into `main` unless explicitly requested
 
-> Note: Git does not allow spaces in branch names.  
-> Requested name `feature/Student Management` is represented as `feature/Student-Management`.
+> Git does not allow spaces in branch names.  
+> `feature/Student Management` is represented as `feature/Student-Management`.
 
 ## 30. Git commands
 
 ```powershell
-cd D:\student-app
+cd D:\Student-Management
 git status
 git branch
 git branch --show-current
 
-# Ensure you are on the feature branch before committing
-git checkout feature/Student-Management
+# Current GKE/infrastructure branch
+git checkout feature/student-management-gke-infrastructure
 
 git add .
 git commit -m "feat: your message"
-git push origin feature/Student-Management
+git push origin feature/student-management-gke-infrastructure
 ```
 
 ## 31. Feature branch information
 
 - Repository: https://github.com/manjunath031984/Student-Management
-- Feature branch: `feature/Student-Management`
-- Branch URL: https://github.com/manjunath031984/Student-Management/tree/feature/Student-Management
+- Localhost feature branch: `feature/Student-Management`
+- GKE infrastructure branch: `feature/student-management-gke-infrastructure`
 - Account: https://github.com/manjunath031984
 
-## 32. Future enhancements
+## 32. Local application future enhancements
 
-Possible next improvements (not implemented yet):
+Possible next **application** improvements (not implemented yet):
 
 - Reset PostgreSQL ID sequence when all students are deleted (`TRUNCATE ... RESTART IDENTITY`)
 - Search/filter students by name or course
@@ -678,7 +1433,8 @@ This section is a complete from-scratch guide for another Windows PC that has **
 |------|----------------|
 | GitHub repo | `https://github.com/manjunath031984/Student-Management` |
 | Default branch | `main` |
-| Development branch | `feature/Student-Management` |
+| Development branch (localhost) | `feature/Student-Management` |
+| Infrastructure branch (current) | `feature/student-management-gke-infrastructure` |
 | Local folder after clone | `Student-Management` |
 | Backend API base | `http://localhost:8080/api` |
 | Axios `baseURL` | hard-coded in `frontend/src/services/studentService.js` as `http://localhost:8080/api` |
@@ -862,15 +1618,15 @@ cd D:\
 git clone https://github.com/manjunath031984/Student-Management.git
 cd Student-Management
 git branch -a
-git checkout feature/Student-Management
+git checkout feature/student-management-gke-infrastructure
 git status
 git branch --show-current
 ```
 
-Expected current branch:
+For localhost-only application history:
 
-```text
-feature/Student-Management
+```powershell
+git checkout feature/Student-Management
 ```
 
 Do **not** develop on `main`.
@@ -908,6 +1664,10 @@ Student-Management/
 │   ├── Dockerfile
 │   ├── nginx.conf
 │   └── .dockerignore
+├── terraform/
+├── jenkins/
+│   └── Dockerfile
+├── Jenkinsfile
 ├── .gitignore
 ├── README.md
 └── setup.ps1
@@ -1131,7 +1891,7 @@ Actual value:
 baseURL: 'http://localhost:8080/api'
 ```
 
-No `VITE_API_BASE_URL` file is required.
+No `.env` file is required for local Vite. Unset `VITE_API_BASE_URL` uses `http://localhost:8080/api`. GKE images bake in `VITE_API_BASE_URL=/api` via the frontend Dockerfile / Jenkins `--build-arg`.
 
 ```powershell
 cd D:\Student-Management\frontend
@@ -1291,7 +2051,7 @@ docker rm -f student-management-backend student-management-frontend
 | 21 | Docker backend DB fail | used localhost | logs show refused | use `DB_HOST=host.docker.internal` | API 200 |
 | 22 | host.docker.internal issue | Docker Desktop DNS | logs/ping from container | Ensure Docker Desktop running on Windows | DB connects |
 | 23 | Nginx route 404 | missing try_files | open `/add` | Ensure `nginx.conf` has SPA fallback | `/add` returns index |
-| 24 | Git branch problems | wrong branch/name | `git branch --show-current` | `git checkout feature/Student-Management` | correct branch |
+| 24 | Git branch problems | wrong branch/name | `git branch --show-current` | `git checkout feature/student-management-gke-infrastructure` | correct branch |
 
 ---
 
@@ -1301,7 +2061,7 @@ docker rm -f student-management-backend student-management-frontend
 2. Set `JAVA_HOME` + PATH  
 3. `git clone https://github.com/manjunath031984/Student-Management.git`  
 4. `cd Student-Management`  
-5. `git checkout feature/Student-Management`  
+5. `git checkout feature/student-management-gke-infrastructure` (or `feature/Student-Management` for localhost-only history)  
 6. Run `powershell -ExecutionPolicy Bypass -File .\setup.ps1`  
 7. Start PostgreSQL service  
 8. `CREATE DATABASE studentdb;`  
@@ -1329,7 +2089,7 @@ docker rm -f student-management-backend student-management-frontend
 - [ ] Docker Desktop installed  
 - [ ] PostgreSQL 18 installed  
 - [ ] GitHub repository cloned  
-- [ ] `feature/Student-Management` checked out  
+- [ ] Correct feature branch checked out  
 - [ ] `studentdb` created  
 - [ ] PostgreSQL running  
 - [ ] Backend builds  
@@ -1357,5 +2117,6 @@ docker rm -f student-management-backend student-management-frontend
 2. No `docker-compose.yml` / `compose.yaml` files are part of this project.
 3. Java **17** and Maven **3.5.4** only.
 4. PostgreSQL only (no MySQL/MongoDB).
-5. No Spring Security / JWT / authentication.
-6. Localhost learning project — not designed for cloud deployment.
+5. No Spring Security / JWT / authentication on the application.
+6. Local Windows PostgreSQL remains valid for localhost. GKE uses in-cluster PostgreSQL (`student-management` namespace) and Gateway HTTP routing.
+7. Local `gcloud`/`kubectl` use `manjunathv290384@gmail.com` with `roles/container.clusterViewer`. Jenkins/Terraform use `infra-admin`. Do not swap those identities.
