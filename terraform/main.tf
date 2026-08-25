@@ -50,7 +50,7 @@ module "artifact_registry" {
   repository_id = var.artifact_registry_repository
   labels        = local.labels
   reader_members = [
-    "serviceAccount:${module.iam.infra_admin_email}",
+    "serviceAccount:${var.infra_admin_email}",
   ]
 
   depends_on = [module.project_services, module.iam]
