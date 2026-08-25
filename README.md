@@ -35,6 +35,8 @@ Local Docker still does **not** use Docker Compose. Terraform manages GCP infras
 - [Stage 15 — Deployment flow](#stage-15--deployment-flow)
 - [Stage 16 — Command reference](#stage-16--command-reference)
 - [Stage 17 — Troubleshooting](#stage-17--troubleshooting)
+- [Stage 18 — GitHub Webhook / ngrok / Jenkins](#stage-18--github-webhook--ngrok--jenkins)
+- [Stage 19 — Database persistence test](#stage-19--database-persistence-test)
 - [Completed vs future work](#completed-vs-future-work)
 - [Local Windows development](#3-features) (original localhost guide, below)
 
@@ -554,6 +556,8 @@ GatewayClass `gke-l7-regional-external-managed` is GKE-managed; Jenkins applies 
 | `kubectl get pods` | Default namespace (expected empty for this app) |
 | `kubectl get ns` | `student-management` exists |
 | `kubectl get pods -n student-management` | Frontend, backend, Postgres Running |
+| `kubectl get svc -n student-management` | All services ClusterIP with expected ports (80, 8080, 5432) |
+| `kubectl get pvc -n student-management` | PostgreSQL PVC `student-management-postgres-pvc` is Bound |
 
 Jenkins **Deployment Verification** also checks exactly two nodes, ClusterIP services, Gateway address, and HTTP 200 on `http://<GATEWAY-IP>/` and `http://<GATEWAY-IP>/api/students`.
 
@@ -602,20 +606,22 @@ PostgreSQL password: if the secret does not exist, Jenkins generates one with `/
 
 ```mermaid
 flowchart TD
-  Developer["Developer / Git"] --> Jenkins
+  Developer["Developer\ngit push"] --> GitHub["GitHub\nmanjunath031984/Student-Management"]
+  GitHub -->|"webhook → ngrok → localhost:8090"| Jenkins["Jenkins\nlocalhost:8090"]
   Jenkins --> Terraform
   Terraform --> IAM["GCP IAM"]
   Terraform --> VPC["VPC gke-vpc"]
   Terraform --> GKE["GKE gke-student-mgmt-dev"]
-  Terraform --> AR["Artifact Registry"]
+  Terraform --> AR["Artifact Registry\nus-central1"]
   Jenkins --> AR
   AR --> GKE
   Jenkins -->|kubectl| NS["Namespace student-management"]
-  NS --> FE["Frontend Deployment"]
-  NS --> BE["Backend Deployment"]
-  NS --> PG["PostgreSQL StatefulSet"]
+  NS --> FE["Frontend Deployment\nport 80"]
+  NS --> BE["Backend Deployment\nport 8080"]
+  NS --> PG["PostgreSQL StatefulSet\nport 5432"]
   BE --> PG
-  GW["GKE Gateway HTTP"] --> FE
+  PVC["PVC student-management-postgres-pvc\n10Gi standard-rwo"] --> PG
+  GW["GKE Gateway HTTP :80\ngke-l7-regional-external-managed"] --> FE
   GW --> BE
   Operator["manjunathv290384@gmail.com"] -->|clusterViewer| GKE
 ```
@@ -698,6 +704,10 @@ kubectl get nodes
 kubectl get pods
 kubectl get ns
 kubectl get pods -n student-management
+kubectl get svc -n student-management
+kubectl get pvc -n student-management
+kubectl get gateway,httproute -n student-management
+kubectl get statefulset -n student-management
 ```
 
 ---
@@ -734,6 +744,183 @@ kubectl get pods -n student-management
 
 ---
 
+## Stage 18 — GitHub Webhook / ngrok / Jenkins
+
+### Overview
+
+Jenkins runs **locally** at `http://localhost:8090`. Because GitHub cannot reach a local machine directly, [ngrok](https://ngrok.com) is used to create a temporary public HTTPS tunnel to the local Jenkins instance. This setup is used for **learning and local development only**.
+
+> **Note:** This is not a production Jenkins exposure method. The ngrok URL changes every time ngrok restarts unless a paid static domain is configured.
+
+### Trigger flow
+
+```mermaid
+flowchart LR
+  Dev["Developer\ngit push"] --> GH["GitHub\nmanjunath031984/Student-Management"]
+  GH -->|"POST /github-webhook/\napplication/json"| NG["ngrok\nhttps://&lt;NGROK_URL&gt;"]
+  NG -->|"HTTP forward"| JK["Jenkins\nlocalhost:8090"]
+  JK --> PL["student-management-gke-pipeline"]
+```
+
+### Step 1 — Start Jenkins locally
+
+Ensure Jenkins is running and reachable at `http://localhost:8090`.
+
+### Step 2 — Start ngrok
+
+```bash
+ngrok http 8090
+```
+
+ngrok prints a forwarding URL, for example:
+
+```text
+Forwarding  https://<NGROK_URL> -> http://localhost:8090
+```
+
+Copy the **HTTPS** forwarding URL. Do not hard-code this URL anywhere in the repository because it changes on each ngrok restart.
+
+### Step 3 — Configure the GitHub webhook
+
+1. Open: `https://github.com/manjunath031984/Student-Management`
+2. Navigate to **Settings → Webhooks → Add webhook**.
+3. Set **Payload URL** to:
+   ```text
+   https://<NGROK_URL>/github-webhook/
+   ```
+4. Set **Content type** to `application/json`.
+5. Under **Which events would you like to trigger this webhook?**, select **Just the push event**.
+6. Click **Add webhook**.
+
+If the URL has changed (ngrok restarted), update the **Payload URL** in the existing webhook entry.
+
+### Step 4 — Configure the Jenkins job trigger
+
+In the Jenkins job `student-management-gke-pipeline`:
+
+1. Go to **Configure → Build Triggers**.
+2. Enable **GitHub hook trigger for GITScm polling**.
+3. Save.
+
+### Jenkins job reference
+
+| Item | Value |
+|------|-------|
+| Job name | `student-management-gke-pipeline` |
+| Jenkins local URL | `http://localhost:8090` |
+| Webhook endpoint | `/github-webhook/` |
+| Trigger type | GitHub hook trigger for GITScm polling |
+
+### Step 5 — Test the webhook
+
+1. Keep ngrok running.
+2. Make a code change on the feature branch:
+   ```bash
+   git checkout feature/student-management-gke-infrastructure
+   git add .
+   git commit -m "test: verify GitHub webhook trigger"
+   git push origin feature/student-management-gke-infrastructure
+   ```
+3. Open GitHub → **Settings → Webhooks → Recent Deliveries**.
+4. Verify the webhook delivery shows HTTP 200.
+5. Verify Jenkins automatically starts a new build of `student-management-gke-pipeline`.
+6. Open Jenkins **Console Output** and confirm pipeline execution.
+
+### Important notes
+
+- ngrok **must remain running** while GitHub needs to reach Jenkins. Stopping ngrok breaks the webhook immediately.
+- The ngrok URL **changes** on each ngrok restart. Update the GitHub webhook Payload URL whenever it changes.
+- Use `https://<NGROK_URL>/github-webhook/` — the trailing slash is required by Jenkins.
+- Do **not** commit the ngrok URL to source code or configuration files.
+- No ngrok authtoken, GCP credentials, or other secrets are stored in this repository.
+
+---
+
+## Stage 19 — Database persistence test
+
+This test validates that PostgreSQL data survives pod deletion and recreation, confirming that the PersistentVolumeClaim (`student-management-postgres-pvc`) is correctly bound and that the StatefulSet reattaches it after the pod restarts.
+
+### Background
+
+| Resource | Name | Details |
+|----------|------|---------|
+| StatefulSet | `student-management-postgres` | `postgres:18`, `pg_isready` liveness probe |
+| PVC | `student-management-postgres-pvc` | `10Gi`, `ReadWriteOnce`, `standard-rwo` |
+| Namespace | `student-management` | |
+
+Because PostgreSQL data lives on the Persistent Disk bound to the PVC — not inside the pod's container layer — deleting the pod does not delete data.
+
+### Step 1 — Insert a student record
+
+Use the frontend or the API endpoint:
+
+```bash
+curl -s -X POST "http://<GATEWAY-IP>/api/students" \
+  -H "Content-Type: application/json" \
+  -d '{"firstName":"Test","lastName":"Persistence","email":"test@example.com"}'
+```
+
+Note the `id` returned. Confirm the record exists:
+
+```bash
+curl -s "http://<GATEWAY-IP>/api/students"
+```
+
+### Step 2 — Delete the PostgreSQL pod
+
+```bash
+kubectl -n student-management delete pod student-management-postgres-0
+```
+
+The StatefulSet controller immediately schedules recreation of `student-management-postgres-0`.
+
+### Step 3 — Wait for the pod to become Ready
+
+```bash
+kubectl -n student-management get pods -w
+```
+
+Wait until `student-management-postgres-0` shows `1/1 Running`. Alternatively:
+
+```bash
+kubectl wait --for=condition=Ready pod/student-management-postgres-0 \
+  -n student-management --timeout=120s
+```
+
+### Step 4 — Verify the PVC is still Bound
+
+```bash
+kubectl get pvc -n student-management
+```
+
+Expected:
+
+```text
+NAME                              STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+student-management-postgres-pvc   Bound    ...      10Gi       RWO            standard-rwo   ...
+```
+
+The PVC status must remain `Bound`. Do **not** delete the PVC.
+
+### Step 5 — Verify the student record still exists
+
+```bash
+curl -s "http://<GATEWAY-IP>/api/students"
+```
+
+The record inserted in Step 1 must still appear. This confirms the PostgreSQL data directory persisted on the GKE Persistent Disk and was reattached by the StatefulSet.
+
+### Result
+
+| Check | Result |
+|-------|--------|
+| Pod deleted and recreated by StatefulSet | Verified |
+| PVC remained Bound after pod recreation | Verified |
+| Student record available after pod recreation | Verified |
+| Data loss | None |
+
+---
+
 ## Completed vs future work
 
 ### Completed
@@ -744,6 +931,8 @@ kubectl get pods -n student-management
 - Jenkins pipeline: tests, Terraform, image push, kubectl deploy, Gateway verification
 - Live validation: two Ready nodes; frontend, backend, Postgres Running in `student-management`
 - Human operator Cluster Viewer binding in Terraform
+- PostgreSQL persistence test: pod deleted and recreated; PVC remained Bound; student data survived
+- GitHub webhook trigger via ngrok (learning/local development setup; `http://localhost:8090`)
 
 ### Future enhancements
 
