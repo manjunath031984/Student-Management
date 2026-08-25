@@ -18,9 +18,13 @@ State prefixes (configured in `terraform/backend/*.tfbackend`):
 | QA          | `gke/qa`   |
 | PROD        | `gke/prod` |
 
-## Apply once (local state)
+## Apply once (local state) or via Jenkins
 
 This bootstrap stack uses local state on purpose (chicken-and-egg).
+
+Jenkins creates the bucket idempotently (if missing) before `terraform init` of the main stack.
+
+Manual:
 
 ```bash
 cd terraform/bootstrap

@@ -5,11 +5,10 @@ module "project_services" {
 }
 
 module "iam" {
-  source             = "./modules/iam"
-  project_id         = var.project_id
-  infra_admin_email  = var.infra_admin_email
-  node_sa_account_id = "gke-student-mgmt-nodes"
-  labels             = local.labels
+  source            = "./modules/iam"
+  project_id        = var.project_id
+  infra_admin_email = var.infra_admin_email
+  labels            = local.labels
 
   depends_on = [module.project_services]
 }
@@ -51,7 +50,7 @@ module "artifact_registry" {
   repository_id = var.artifact_registry_repository
   labels        = local.labels
   reader_members = [
-    "serviceAccount:${module.iam.gke_node_sa_email}",
+    "serviceAccount:${module.iam.infra_admin_email}",
   ]
 
   depends_on = [module.project_services, module.iam]
@@ -73,7 +72,7 @@ module "gke" {
   disk_size_gb               = var.disk_size_gb
   disk_type                  = var.disk_type
   image_type                 = var.node_image_type
-  node_service_account_email = module.iam.gke_node_sa_email
+  node_service_account_email = module.iam.infra_admin_email
   node_tags                  = [var.ssh_target_tag, var.web_target_tag]
   deletion_protection        = var.deletion_protection
   labels                     = local.labels

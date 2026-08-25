@@ -66,6 +66,12 @@ resource "google_container_cluster" "this" {
       initial_node_count,
     ]
   }
+
+  timeouts {
+    create = "45m"
+    update = "45m"
+    delete = "45m"
+  }
 }
 
 resource "google_container_node_pool" "workers" {
@@ -118,5 +124,11 @@ resource "google_container_node_pool" "workers" {
     ignore_changes = [
       initial_node_count,
     ]
+  }
+
+  timeouts {
+    create = "45m"
+    update = "45m"
+    delete = "45m"
   }
 }

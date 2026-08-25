@@ -73,7 +73,7 @@ Application ports and API paths come from the existing repository:
 |--------|----------------|
 | `modules/project-services` | Enable GCP APIs (idempotent) |
 | `modules/iam` | Least-privilege roles for `infra-admin` and the GKE node SA |
-| `modules/network` | VPC `gke-vpc`, subnet `Gke-subnet`, secondary ranges, proxy-only subnet |
+| `modules/network` | VPC `gke-vpc`, subnet `gke-subnet`, secondary ranges, proxy-only subnet |
 | `modules/firewall` | Direct SSH TCP/22 and GCP health checks (not PostgreSQL) |
 | `modules/artifact-registry` | Docker repo `student-management` |
 | `modules/gke` | Regional Standard cluster + one node pool |
@@ -107,6 +107,7 @@ Roles granted to infra-admin (no Owner/Editor):
 - `roles/logging.configWriter`
 - `roles/monitoring.editor`
 - `roles/storage.objectAdmin`
+- `roles/storage.admin` (create/configure the Terraform state bucket `gcp-dev-july-2026-terraform-state` before `terraform init`)
 
 Node service account `gke-student-mgmt-nodes`:
 
@@ -125,7 +126,7 @@ If apply fails with a missing permission: identify the exact permission, add onl
 
 ## 7. Subnet
 
-- Name: `Gke-subnet`
+- Name: `gke-subnet`
 - Region: `us-central1`
 - CIDR: `192.168.0.0/24`
 - `private_ip_google_access = true`
@@ -169,7 +170,7 @@ gcloud compute ssh INSTANCE --zone=us-central1-b
 
 - Standard regional cluster (not Autopilot)
 - Names: `gke-student-mgmt-dev` / `-qa` / `-prod`
-- Network `gke-vpc`, subnet `Gke-subnet`
+- Network `gke-vpc`, subnet `gke-subnet`
 - Workload Identity, Cloud Logging, Cloud Monitoring
 - Gateway API channel: `CHANNEL_STANDARD`
 
@@ -412,6 +413,7 @@ Jenkins `ACTION=destroy` shows the destroy plan and requires approval. It does n
 | SSH timeout | Firewall `gke-student-mgmt-allow-ssh`, tag `gke-student-mgmt-ssh`, no IAP |
 | Permission denied on apply | Add only the missing IAM role and document it in section 5 |
 | `fmt` fails | `terraform fmt -recursive` |
+| `storage: bucket doesn't exist` | Jenkins must create `gcp-dev-july-2026-terraform-state` before `terraform init`. Grant `infra-admin` `roles/storage.admin` if bucket create returns 403. |
 
 ## Outputs
 
